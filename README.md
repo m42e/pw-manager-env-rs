@@ -1,0 +1,285 @@
+# pw-env
+
+`pw-env` is a Rust CLI that resolves `.env` entries from password managers instead of storing secrets in plaintext. It supports 1Password, Bitwarden, and GPG-encrypted env files, and can either print shell exports for `eval` or install a shell hook that automatically reloads secrets when you change directories.
+
+The tool is designed for local development workflows where projects keep a checked-in or local `.env` shape, but secret values come from a secure backend.
+
+## Features
+
+- Resolves empty `.env` entries from a default backend by key name
+- Supports explicit `op://...` and `bw://...` references per variable
+- Supports GPG-backed secret files such as `.env.gpg`
+- Generates shell hooks for `bash`, `zsh`, and `fish`
+- Warns when plaintext secrets are still present in `.env`
+- Migrates plaintext values out of `.env` into the configured backend
+- Supports per-project backend overrides via config
+
+## Install
+
+Build from source with Cargo:
+
+```bash
+cargo build --release
+```
+
+The binary will be available at:
+
+```bash
+target/release/pw-env
+```
+
+For local development, you can also run it directly with Cargo:
+
+```bash
+cargo run -- --help
+```
+
+## Quick Start
+
+### 1. Create a `.env` file
+
+Use empty values for secrets you want to resolve from the default backend:
+
+```dotenv
+DATABASE_URL=
+API_KEY=
+```
+
+Or mix in explicit references:
+
+```dotenv
+DATABASE_URL=op://Development/my-app/database_url
+API_KEY=bw://env-secrets/my-app/api_key
+LOG_LEVEL=debug
+```
+
+Value handling works like this:
+
+- `KEY=` resolves `KEY` from the configured default backend
+- `KEY=op://vault/item/field` resolves through 1Password
+- `KEY=bw://[folder/]item/field` resolves through Bitwarden
+- `KEY=plaintext` is treated as plaintext and left as-is until migrated
+
+For the GPG backend, empty keys are resolved from an encrypted env file such as `.env.gpg`.
+
+### 2. Create a config file
+
+Generate the template:
+
+```bash
+pw-env config-template > ~/.config/pw-manager-env/config.toml
+```
+
+Minimal example using 1Password:
+
+```toml
+[defaults]
+backend = "op"
+
+[defaults.op]
+vault = "Development"
+```
+
+Minimal example using Bitwarden:
+
+```toml
+[defaults]
+backend = "bw"
+
+[defaults.bw]
+folder = "env-secrets"
+```
+
+Minimal example using GPG:
+
+```toml
+[defaults]
+backend = "gpg"
+
+[defaults.gpg]
+file_pattern = ".env.gpg"
+recipient = "your-email@example.com"
+```
+
+### 3. Export variables into your shell
+
+For one-off use:
+
+```bash
+eval "$(pw-env export . --shell bash)"
+```
+
+For `fish`:
+
+```fish
+pw-env export . --shell fish | source
+```
+
+### 4. Install the shell hook
+
+`bash`:
+
+```bash
+eval "$(pw-env init bash)"
+```
+
+Add that to your `~/.bashrc` to enable automatic loading on `cd`.
+
+`zsh`:
+
+```zsh
+eval "$(pw-env init zsh)"
+```
+
+Add that to your `~/.zshrc`.
+
+`fish`:
+
+```fish
+pw-env init fish | source
+```
+
+Add that to your fish config.
+
+The generated hooks unset previously exported variables when you leave a directory and load new ones when entering a directory containing `.env`.
+
+## Backend Resolution Model
+
+`pw-env` resolves variables in three groups:
+
+1. `op://...` entries always use 1Password
+2. `bw://...` entries always use Bitwarden
+3. Empty values use the configured default backend
+
+For 1Password and Bitwarden, empty keys can be resolved in two common ways:
+
+- By item name matching the env key, usually reading the password field
+- By reading a field from a configured shared item when `item = "project-env"` is set
+
+For GPG, empty keys are looked up in the decrypted contents of the configured encrypted env file.
+
+Project name detection uses the nearest Git repository root directory name when disambiguating duplicate entries in 1Password or Bitwarden.
+
+## Configuration
+
+Default config path:
+
+```text
+~/.config/pw-manager-env/config.toml
+```
+
+Top-level sections:
+
+- `[defaults]` selects the default backend
+- `[defaults.op]` configures 1Password defaults such as `vault`, `account`, and `item`
+- `[defaults.bw]` configures Bitwarden defaults such as `folder`, `organization`, and `item`
+- `[defaults.gpg]` configures `file_pattern` and `recipient`
+- `[log]` configures log level and optional log file path
+- `[[projects]]` defines per-path overrides
+
+Example with per-project overrides:
+
+```toml
+[defaults]
+backend = "op"
+
+[defaults.op]
+vault = "Development"
+
+[[projects]]
+path = "~/work/company-api"
+backend = "op"
+item = "company-api-env"
+
+[projects.op]
+vault = "Work"
+
+[[projects]]
+path = "~/personal/site"
+backend = "gpg"
+
+[projects.gpg]
+file_pattern = ".secrets.gpg"
+recipient = "you@example.com"
+```
+
+## Command Reference
+
+Show all commands:
+
+```bash
+pw-env --help
+```
+
+Main subcommands:
+
+- `pw-env init <bash|zsh|fish>` prints shell hook code
+- `pw-env export [dir] --shell <bash|zsh|fish>` prints resolved exports for shell evaluation
+- `pw-env load [dir]` prints a human-readable resolution summary and export statements
+- `pw-env migrate [dir]` interactively stores plaintext `.env` values in the configured backend and clears them from `.env`
+- `pw-env check` checks available backends and active configuration
+- `pw-env config-template` prints the default config template
+
+## Migration Workflow
+
+If `.env` still contains plaintext values:
+
+```dotenv
+DATABASE_PASSWORD=super-secret
+API_KEY=abc123
+```
+
+Run:
+
+```bash
+pw-env migrate
+```
+
+The tool will:
+
+- detect plaintext entries
+- prompt before storing each one
+- verify the value was stored successfully
+- rewrite `.env` with migrated keys cleared
+
+After migration, the file becomes:
+
+```dotenv
+DATABASE_PASSWORD=
+API_KEY=
+```
+
+## Backend Prerequisites
+
+Install and authenticate the backend you plan to use:
+
+- 1Password: `op` CLI installed and authenticated
+- Bitwarden: `bw` CLI installed, logged in, and unlocked as needed
+- GPG: `gpg` installed, with a configured recipient for encryption during migration
+
+You can verify local backend availability with:
+
+```bash
+pw-env check
+```
+
+## Security Notes
+
+- Resolved values are printed as shell export statements, so use `eval` only in trusted local workflows
+- Export formatting validates environment variable names and single-quote escapes values for shell safety
+- Plaintext values in `.env` are not exported as secrets by the resolver; they are left in place and reported for migration
+- GPG mode stores secrets in an encrypted file on disk rather than fetching them from an external password manager
+
+## Development
+
+Common commands:
+
+```bash
+cargo fmt
+cargo test
+cargo run -- check
+```
+
+## Release
+
+The repository includes a documented multi-stage release process. See `release-workflow.md` for the release branching, tagging, and publishing flow.
