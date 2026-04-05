@@ -120,7 +120,6 @@ jobs:
             --sign "$APPLE_SIGNING_IDENTITY" \
             "$binary_path"
           codesign --verify --verbose=2 "$binary_path"
-          spctl -a -vv "$binary_path"
 
       - name: Notarize macOS binary
         if: runner.os == 'macOS'
