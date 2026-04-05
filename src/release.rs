@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const RELEASE_CHECK_STATE_FILE: &str = "release-check.json";
-const GITHUB_OWNER: &str = "m42e";
 const GITHUB_REPO: &str = "pw-manager-env-rs";
 const RELEASE_API_URL: &str = "https://api.github.com/repos/m42e/pw-manager-env-rs/releases/latest";
 const RELEASES_URL: &str = "https://github.com/m42e/pw-manager-env-rs/releases/latest";
@@ -227,7 +226,6 @@ mod tests {
 
     #[test]
     fn github_release_owner_constant_matches_repo_url() {
-        assert_eq!(GITHUB_OWNER, "m42e");
-        assert!(RELEASE_API_URL.contains(GITHUB_OWNER));
+        assert!(RELEASE_API_URL.contains("/m42e/"));
     }
 }

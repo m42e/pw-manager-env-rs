@@ -141,18 +141,16 @@ impl EnvFile {
         &'a self,
         reviewed_fingerprints: &std::collections::BTreeSet<String>,
     ) -> Vec<&'a EnvEntry> {
-        self.entries()
+        self.likely_secret_entries()
             .into_iter()
             .filter(|entry| {
-                entry.is_likely_secret()
-                    && !entry.no_migrate
-                    && match &entry.kind {
-                        EntryKind::Plaintext(value) => {
-                            let fingerprint = review_fingerprint(&entry.key, value);
-                            !reviewed_fingerprints.contains(&fingerprint)
-                        }
-                        _ => true,
+                match &entry.kind {
+                    EntryKind::Plaintext(value) => {
+                        let fingerprint = review_fingerprint(&entry.key, value);
+                        !reviewed_fingerprints.contains(&fingerprint)
                     }
+                    _ => true,
+                }
             })
             .collect()
     }
