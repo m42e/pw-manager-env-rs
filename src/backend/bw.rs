@@ -2,11 +2,57 @@ use anyhow::{Context, Result, bail};
 use std::process::Command;
 use tracing::{debug, info, warn};
 
-use super::{Backend, ResolveContext, StoreContext};
+use super::{
+    Backend, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME, ResolveContext, StoreContext,
+};
 
 pub struct BwBackend;
 
 impl BwBackend {
+    fn migration_metadata_fields(ctx: &StoreContext) -> Vec<serde_json::Value> {
+        let mut fields = vec![serde_json::json!({
+            "name": MIGRATED_FROM_FIELD_NAME,
+            "value": ctx.migrated_from(),
+            "type": 0
+        })];
+        if let Some(project) = ctx.project.as_deref() {
+            fields.push(serde_json::json!({
+                "name": PROJECT_FIELD_NAME,
+                "value": project,
+                "type": 0
+            }));
+        }
+        fields
+    }
+
+    fn upsert_custom_field(
+        item: &mut serde_json::Value,
+        name: &str,
+        value: &str,
+        field_type: u8,
+    ) {
+        let fields = item
+            .as_object_mut()
+            .and_then(|object| object.entry("fields").or_insert_with(|| serde_json::json!([])).as_array_mut())
+            .expect("Bitwarden item fields must be an array");
+
+        if let Some(existing) = fields.iter_mut().find(|field| {
+            field.get("name").and_then(|field_name| field_name.as_str()) == Some(name)
+        }) {
+            *existing = serde_json::json!({
+                "name": name,
+                "value": value,
+                "type": field_type
+            });
+        } else {
+            fields.push(serde_json::json!({
+                "name": name,
+                "value": value,
+                "type": field_type
+            }));
+        }
+    }
+
     fn run_bw(args: &[&str]) -> Result<String> {
         let mut cmd = Command::new("bw");
         cmd.args(args);
@@ -188,6 +234,7 @@ impl Backend for BwBackend {
 
     fn store(&self, key: &str, value: &str, ctx: &StoreContext) -> Result<()> {
         let bw_config = ctx.config.effective_bw(ctx.dir);
+        let metadata_fields = Self::migration_metadata_fields(ctx);
 
         if let Some(item_name) = ctx.config.effective_item(ctx.dir) {
             // Try to get existing item and add a custom field
@@ -195,15 +242,15 @@ impl Backend for BwBackend {
             let item_result = Self::run_bw(&["get", "item", item_name]);
             if let Ok(item_json) = item_result {
                 let mut item: serde_json::Value = serde_json::from_str(&item_json)?;
-                let fields = item
-                    .as_object_mut()
-                    .and_then(|o| o.entry("fields").or_insert_with(|| serde_json::json!([])).as_array_mut());
-                if let Some(fields) = fields {
-                    fields.push(serde_json::json!({
-                        "name": key,
-                        "value": value,
-                        "type": 1
-                    }));
+                Self::upsert_custom_field(&mut item, key, value, 1);
+                for field in &metadata_fields {
+                    if let (Some(name), Some(field_value), Some(field_type)) = (
+                        field.get("name").and_then(|field_name| field_name.as_str()),
+                        field.get("value").and_then(|field_value| field_value.as_str()),
+                        field.get("type").and_then(|field_type| field_type.as_u64()),
+                    ) {
+                        Self::upsert_custom_field(&mut item, name, field_value, field_type as u8);
+                    }
                 }
                 let encoded = serde_json::to_string(&item)?;
                 // bw edit item expects base64-encoded JSON on stdin, but we use a simpler approach
@@ -236,7 +283,8 @@ impl Backend for BwBackend {
             "login": {
                 "password": value
             },
-            "folderId": bw_config.folder.as_deref()
+            "folderId": bw_config.folder.as_deref(),
+            "fields": metadata_fields
         });
         let encoded = serde_json::to_string(&item_template)?;
         let encoded_b64 = base64_encode(encoded.as_bytes());
@@ -268,6 +316,61 @@ impl Backend for BwBackend {
 
     fn name(&self) -> &str {
         "Bitwarden"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Config, Defaults, LogConfig};
+    use std::path::Path;
+
+    fn test_store_context() -> StoreContext<'static> {
+        let config = Box::leak(Box::new(Config {
+            defaults: Defaults::default(),
+            log: LogConfig::default(),
+            projects: vec![],
+        }));
+
+        StoreContext {
+            dir: Path::new("/tmp/example/service"),
+            config,
+            project: Some("example".to_string()),
+        }
+    }
+
+    #[test]
+    fn test_migration_metadata_fields_include_project_and_source_dir() {
+        let fields = BwBackend::migration_metadata_fields(&test_store_context());
+
+        assert!(fields.iter().any(|field| {
+            field.get("name").and_then(|value| value.as_str()) == Some("migrated_from")
+                && field.get("value").and_then(|value| value.as_str())
+                    == Some("/tmp/example/service")
+        }));
+        assert!(fields.iter().any(|field| {
+            field.get("name").and_then(|value| value.as_str()) == Some("project")
+                && field.get("value").and_then(|value| value.as_str()) == Some("example")
+        }));
+    }
+
+    #[test]
+    fn test_upsert_custom_field_replaces_existing_field() {
+        let mut item = serde_json::json!({
+            "fields": [
+                {
+                    "name": "project",
+                    "value": "old",
+                    "type": 0
+                }
+            ]
+        });
+
+        BwBackend::upsert_custom_field(&mut item, "project", "new", 0);
+
+        let fields = item.get("fields").and_then(|value| value.as_array()).unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].get("value").and_then(|value| value.as_str()), Some("new"));
     }
 }
 

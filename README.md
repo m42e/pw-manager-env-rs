@@ -297,6 +297,7 @@ The tool will:
 
 - detect plaintext entries
 - prompt before storing each one
+- store `project` metadata using the Git root folder name and `migrated_from` metadata with the source directory path
 - verify the value was stored successfully
 - rewrite `.env` with migrated keys cleared
 

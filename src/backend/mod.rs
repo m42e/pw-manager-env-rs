@@ -7,6 +7,9 @@ use std::path::Path;
 
 use crate::config::Config;
 
+pub const PROJECT_FIELD_NAME: &str = "project";
+pub const MIGRATED_FROM_FIELD_NAME: &str = "migrated_from";
+
 /// Context passed to backend operations for resolving secrets.
 pub struct ResolveContext<'a> {
     pub dir: &'a Path,
@@ -19,6 +22,13 @@ pub struct ResolveContext<'a> {
 pub struct StoreContext<'a> {
     pub dir: &'a Path,
     pub config: &'a Config,
+    pub project: Option<String>,
+}
+
+impl StoreContext<'_> {
+    pub fn migrated_from(&self) -> String {
+        self.dir.display().to_string()
+    }
 }
 
 /// Trait for password manager backends.

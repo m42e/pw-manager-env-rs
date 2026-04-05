@@ -6,6 +6,7 @@ use tracing::{info, warn};
 use crate::backend::{self, ResolveContext, StoreContext};
 use crate::config::Config;
 use crate::env_file::EnvFile;
+use crate::resolve;
 
 /// Run the migration process: detect plaintext secrets in .env, offer to store them
 /// in the configured password backend, then rewrite .env to clear them.
@@ -55,8 +56,13 @@ pub fn migrate(dir: &Path, config: &Config) -> Result<()> {
     );
 
     let backend = backend::create_backend(backend_name)?;
-    let store_ctx = StoreContext { dir, config };
-    let resolve_ctx = ResolveContext { dir, config, project: None };
+    let project = resolve::detect_project_name(dir);
+    let store_ctx = StoreContext {
+        dir,
+        config,
+        project: project.clone(),
+    };
+    let resolve_ctx = ResolveContext { dir, config, project };
     let mut migrated_keys: Vec<&str> = Vec::new();
 
     for entry in &plaintext_entries {
