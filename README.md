@@ -352,4 +352,4 @@ cargo run -- check
 
 ## Release
 
-The repository includes a documented multi-stage release process. See `release-workflow.md` for the release branching, tagging, and publishing flow.
+The repository includes a documented multi-stage release process. See `release-workflow.md` for the tagging, publishing, and optional macOS signing setup.
