@@ -1,14 +1,27 @@
 use anyhow::{Context, Result, bail};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::process::Command;
 use tracing::debug;
 
-use super::{Backend, ResolveContext, StoreContext};
+use super::{
+    Backend, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME, ResolveContext, StoreContext,
+};
 
 pub struct GpgBackend;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct StoredSecret {
+    value: String,
+    project: Option<String>,
+    migrated_from: Option<String>,
+}
+
 impl GpgBackend {
+    fn metadata_comment(name: &str, value: &str) -> String {
+        format!("# pw-env: {name}={value}")
+    }
+
     /// Decrypt a GPG file and return its contents entirely in memory.
     fn decrypt_file(path: &PathBuf) -> Result<String> {
         debug!("Decrypting GPG file: {}", path.display());
@@ -27,10 +40,31 @@ impl GpgBackend {
 
     /// Parse KEY=VALUE lines from decrypted content (like a .env file).
     fn parse_env_content(content: &str) -> HashMap<String, String> {
-        let mut map = HashMap::new();
+        Self::parse_stored_secrets(content)
+            .into_iter()
+            .map(|(key, secret)| (key, secret.value))
+            .collect()
+    }
+
+    fn parse_stored_secrets(content: &str) -> BTreeMap<String, StoredSecret> {
+        let mut map = BTreeMap::new();
+        let mut pending_project: Option<String> = None;
+        let mut pending_migrated_from: Option<String> = None;
+
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
+                if let Some(metadata) = line.strip_prefix("# pw-env: ") {
+                    if let Some((name, value)) = metadata.split_once('=') {
+                        match name.trim() {
+                            PROJECT_FIELD_NAME => pending_project = Some(value.trim().to_string()),
+                            MIGRATED_FROM_FIELD_NAME => {
+                                pending_migrated_from = Some(value.trim().to_string())
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 continue;
             }
             if let Some((key, value)) = line.split_once('=') {
@@ -45,8 +79,18 @@ impl GpgBackend {
                     value
                 };
                 if !key.is_empty() {
-                    map.insert(key.to_string(), value.to_string());
+                    map.insert(
+                        key.to_string(),
+                        StoredSecret {
+                            value: value.to_string(),
+                            project: pending_project.take(),
+                            migrated_from: pending_migrated_from.take(),
+                        },
+                    );
                 }
+            } else {
+                pending_project = None;
+                pending_migrated_from = None;
             }
         }
         map
@@ -69,6 +113,34 @@ impl GpgBackend {
         }
         let content = Self::decrypt_file(&path)?;
         Ok(Self::parse_env_content(&content))
+    }
+
+    fn load_all_stored_secrets(ctx: &ResolveContext) -> Result<BTreeMap<String, StoredSecret>> {
+        let path = Self::gpg_file_path(ctx.dir, ctx.config);
+        if !path.exists() {
+            bail!(
+                "GPG encrypted file not found: {}",
+                path.display()
+            );
+        }
+        let content = Self::decrypt_file(&path)?;
+        Ok(Self::parse_stored_secrets(&content))
+    }
+
+    fn serialize_stored_secrets(secrets: &BTreeMap<String, StoredSecret>) -> String {
+        let mut content = String::new();
+        for (key, secret) in secrets {
+            if let Some(project) = secret.project.as_deref() {
+                content.push_str(&Self::metadata_comment(PROJECT_FIELD_NAME, project));
+                content.push('\n');
+            }
+            if let Some(migrated_from) = secret.migrated_from.as_deref() {
+                content.push_str(&Self::metadata_comment(MIGRATED_FROM_FIELD_NAME, migrated_from));
+                content.push('\n');
+            }
+            content.push_str(&format!("{key}={}\n", secret.value));
+        }
+        content
     }
 
     /// Encrypt content and write to the GPG file.
@@ -130,21 +202,21 @@ impl Backend for GpgBackend {
             project: None,
         };
         let mut existing = if path.exists() {
-            Self::load_all(&resolve_ctx).unwrap_or_default()
+            Self::load_all_stored_secrets(&resolve_ctx).unwrap_or_default()
         } else {
-            HashMap::new()
+            BTreeMap::new()
         };
 
-        existing.insert(key.to_string(), value.to_string());
+        existing.insert(
+            key.to_string(),
+            StoredSecret {
+                value: value.to_string(),
+                project: ctx.project.clone(),
+                migrated_from: Some(ctx.migrated_from()),
+            },
+        );
 
-        // Serialize back to KEY=VALUE format in memory
-        let mut content = String::new();
-        let mut keys: Vec<&String> = existing.keys().collect();
-        keys.sort();
-        for k in keys {
-            let v = &existing[k];
-            content.push_str(&format!("{k}={v}\n"));
-        }
+        let content = Self::serialize_stored_secrets(&existing);
 
         Self::encrypt_to_file(&content, &path, recipient)?;
         Ok(())
@@ -191,5 +263,43 @@ SPACED_KEY = spaced_value
         assert_eq!(map.get("API_KEY").unwrap(), "my-api-key");
         assert_eq!(map.get("EMPTY").unwrap(), "");
         assert_eq!(map.get("SPACED_KEY").unwrap(), "spaced_value");
+    }
+
+    #[test]
+    fn test_parse_stored_secrets_reads_metadata_comments() {
+        let content = r#"
+# pw-env: project=service-a
+# pw-env: migrated_from=/tmp/work/service-a
+API_KEY=secret
+PLAIN=value
+"#;
+
+        let stored = GpgBackend::parse_stored_secrets(content);
+
+        assert_eq!(stored.get("API_KEY").unwrap().project.as_deref(), Some("service-a"));
+        assert_eq!(
+            stored.get("API_KEY").unwrap().migrated_from.as_deref(),
+            Some("/tmp/work/service-a")
+        );
+        assert_eq!(stored.get("PLAIN").unwrap().project, None);
+    }
+
+    #[test]
+    fn test_serialize_stored_secrets_emits_metadata_comments() {
+        let mut stored = BTreeMap::new();
+        stored.insert(
+            "API_KEY".to_string(),
+            StoredSecret {
+                value: "secret".to_string(),
+                project: Some("service-a".to_string()),
+                migrated_from: Some("/tmp/work/service-a".to_string()),
+            },
+        );
+
+        let serialized = GpgBackend::serialize_stored_secrets(&stored);
+
+        assert!(serialized.contains("# pw-env: project=service-a"));
+        assert!(serialized.contains("# pw-env: migrated_from=/tmp/work/service-a"));
+        assert!(serialized.contains("API_KEY=secret"));
     }
 }

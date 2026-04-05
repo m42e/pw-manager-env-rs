@@ -2,11 +2,21 @@ use anyhow::{Context, Result, bail};
 use std::process::Command;
 use tracing::{debug, info, warn};
 
-use super::{Backend, ResolveContext, StoreContext};
+use super::{
+    Backend, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME, ResolveContext, StoreContext,
+};
 
 pub struct OpBackend;
 
 impl OpBackend {
+    fn migration_field_assignments(ctx: &StoreContext) -> Vec<String> {
+        let mut assignments = vec![format!("{MIGRATED_FROM_FIELD_NAME}={}", ctx.migrated_from())];
+        if let Some(project) = ctx.project.as_deref() {
+            assignments.push(format!("{PROJECT_FIELD_NAME}={project}"));
+        }
+        assignments
+    }
+
     /// Run `op` with the given arguments, optionally scoped to an account.
     fn run_op(args: &[&str], account: Option<&str>) -> Result<String> {
         let mut cmd = Command::new("op");
@@ -162,12 +172,16 @@ impl Backend for OpBackend {
     fn store(&self, key: &str, value: &str, ctx: &StoreContext) -> Result<()> {
         let op_config = ctx.config.effective_op(ctx.dir);
         let account = op_config.account.as_deref();
+        let metadata_assignments = Self::migration_field_assignments(ctx);
+        let metadata_refs: Vec<&str> = metadata_assignments.iter().map(|assignment| assignment.as_str()).collect();
 
         if let Some(item) = ctx.config.effective_item(ctx.dir) {
             // Try to edit the existing item first, adding/updating the field
             debug!("Storing key '{key}' as field on item '{item}'");
             let field_assignment = format!("{key}={value}");
-            let result = Self::run_op(&["item", "edit", item, &field_assignment], account);
+            let mut args = vec!["item", "edit", item, field_assignment.as_str()];
+            args.extend_from_slice(&metadata_refs);
+            let result = Self::run_op(&args, account);
             if result.is_ok() {
                 return Ok(());
             }
@@ -185,6 +199,7 @@ impl Backend for OpBackend {
         let field_assignment = format!("password={value}");
         let title_arg = format!("--title={key}");
         let mut args = vec!["item", "create", "--category=login", title_arg.as_str(), field_assignment.as_str()];
+        args.extend_from_slice(&metadata_refs);
         args.extend_from_slice(&vault_refs);
         Self::run_op(&args, account)?;
         Ok(())
@@ -199,5 +214,31 @@ impl Backend for OpBackend {
 
     fn name(&self) -> &str {
         "1Password"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Config, Defaults, LogConfig};
+    use std::path::Path;
+
+    #[test]
+    fn test_migration_field_assignments_include_project_and_source_dir() {
+        let config = Config {
+            defaults: Defaults::default(),
+            log: LogConfig::default(),
+            projects: vec![],
+        };
+        let ctx = StoreContext {
+            dir: Path::new("/tmp/example/service"),
+            config: &config,
+            project: Some("example".to_string()),
+        };
+
+        let assignments = OpBackend::migration_field_assignments(&ctx);
+
+        assert!(assignments.contains(&"migrated_from=/tmp/example/service".to_string()));
+        assert!(assignments.contains(&"project=example".to_string()));
     }
 }
