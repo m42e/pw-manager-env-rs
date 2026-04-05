@@ -34,7 +34,7 @@ jobs:
       - name: Skip when notarization secrets are unavailable
         if: env.MACOS_NOTARIZATION_SECRETS_PRESENT != 'true'
         run: |
-          echo "::notice title=Finalize Notarization::Apple notarization secrets not configured; skipping notarization finalization."
+          echo "::notice title=Disabled::Apple notarization secrets not configured; skipping notarization finalization."
           echo "Apple notarization secrets not configured; skipping notarization finalization."
 
       - name: Poll pending macOS notarization submissions
@@ -64,12 +64,12 @@ jobs:
 
           echo "Artifact prefix: $artifact_prefix"
           echo "Found $artifact_count pending notarization artifact(s)."
-          echo "::notice title=Finalize Notarization::Found $artifact_count pending notarization artifact(s) for prefix $artifact_prefix"
+          echo "::notice title=Scan::Found $artifact_count pending notarization artifact(s) for prefix $artifact_prefix"
           printf '%s\n' "- Artifact prefix: $artifact_prefix" >> "$GITHUB_STEP_SUMMARY"
           printf '%s\n' "- Pending notarization artifacts found: $artifact_count" >> "$GITHUB_STEP_SUMMARY"
 
           if [ "$artifact_count" -eq 0 ]; then
-            echo "::notice title=Finalize Notarization::No pending macOS notarization artifacts found."
+            echo "::notice title=Done::No pending macOS notarization artifacts found."
             echo "No pending macOS notarization artifacts found."
             printf '%s\n' '- No pending notarization artifacts found.' >> "$GITHUB_STEP_SUMMARY"
             exit 0
@@ -87,7 +87,7 @@ jobs:
             echo "Checking artifact $artifact_name (id=$artifact_id, run_id=${run_id:-none})"
 
             if [ -z "$run_id" ]; then
-              echo "::warning title=Finalize Notarization::$artifact_name is missing workflow run information and will be skipped."
+              echo "::warning title=Skipped::$artifact_name is missing workflow run information and will be skipped."
               echo "Artifact $artifact_name is missing workflow run information; skipping."
               printf '%s\n' "- Skipped $artifact_name because the source workflow run is unavailable." >> "$GITHUB_STEP_SUMMARY"
               skipped_count=$((skipped_count + 1))
@@ -101,7 +101,7 @@ jobs:
 
             metadata_file=$(find "$artifact_dir" -name '*.json' -print -quit)
             if [ -z "$metadata_file" ]; then
-              echo "::warning title=Finalize Notarization::$artifact_name did not contain a metadata JSON file and will be deleted."
+              echo "::warning title=Skipped::$artifact_name did not contain a metadata JSON file and will be deleted."
               echo "Artifact $artifact_name does not contain notarization metadata; deleting it."
               printf '%s\n' "- Deleted $artifact_name because it did not contain a metadata JSON file." >> "$GITHUB_STEP_SUMMARY"
               gh api -X DELETE "repos/$GH_REPO/actions/artifacts/$artifact_id"
@@ -141,7 +141,7 @@ jobs:
 
             case "$status" in
               Accepted)
-                echo "::notice title=Finalize Notarization::$tag $target accepted by Apple; updating release asset."
+                echo "::notice title=Accepted::$tag $target accepted by Apple; updating release asset."
                 echo "Notarization accepted for $tag $target; downloading release asset and stapling binary."
                 mkdir -p "$package_dir"
                 gh release download "$tag" -R "$GH_REPO" --pattern "$asset_name" --dir "$asset_dir"
@@ -154,7 +154,7 @@ jobs:
                     ditto -x -k "$asset_path" "$package_dir"
                     ;;
                   *)
-                    echo "::warning title=Finalize Notarization::$tag $target has unsupported archive format $archive."
+                    echo "::warning title=Failed::$tag $target has unsupported archive format $archive."
                     echo "Unsupported archive format $archive for $artifact_name"
                     printf '%s\n' "- $tag $target: unsupported archive format $archive." >> "$GITHUB_STEP_SUMMARY"
                     gh api -X DELETE "repos/$GH_REPO/actions/artifacts/$artifact_id"
@@ -165,7 +165,7 @@ jobs:
                 esac
 
                 if [ ! -f "$binary_path" ]; then
-                  echo "::warning title=Finalize Notarization::$tag $target packaged binary was missing after download."
+                  echo "::warning title=Failed::$tag $target packaged binary was missing after download."
                   echo "Packaged binary $binary_path is missing for $artifact_name"
                   printf '%s\n' "- $tag $target: packaged binary was missing after download." >> "$GITHUB_STEP_SUMMARY"
                   gh api -X DELETE "repos/$GH_REPO/actions/artifacts/$artifact_id"
@@ -190,19 +190,19 @@ jobs:
                 gh release upload "$tag" -R "$GH_REPO" "$asset_path" --clobber
                 gh api -X DELETE "repos/$GH_REPO/actions/artifacts/$artifact_id"
                 accepted_count=$((accepted_count + 1))
-                echo "::notice title=Finalize Notarization::$tag $target completed; release asset replaced."
+                echo "::notice title=Completed::$tag $target completed; release asset replaced."
                 echo "Completed $tag $target; release asset replaced and artifact deleted."
                 printf '%s\n' "- $tag $target: notarization accepted and release asset updated." >> "$GITHUB_STEP_SUMMARY"
                 ;;
               "In Progress")
                 pending_count=$((pending_count + 1))
-                echo "::notice title=Finalize Notarization::$tag $target still pending at $checked_at."
+                echo "::notice title=Pending::$tag $target still pending at $checked_at."
                 echo "Still pending: $tag $target at $checked_at"
                 printf '%s\n' "- $tag $target: still in progress at $checked_at." >> "$GITHUB_STEP_SUMMARY"
                 ;;
               *)
                 failed_count=$((failed_count + 1))
-                echo "::warning title=Finalize Notarization::$tag $target ended with terminal status $status."
+                echo "::warning title=Failed::$tag $target ended with terminal status $status."
                 echo "Terminal notarization status for $tag $target: $status"
                 printf '%s\n' "- $tag $target: terminal status $status. ${status_summary:-No summary provided.}" >> "$GITHUB_STEP_SUMMARY"
                 gh api -X DELETE "repos/$GH_REPO/actions/artifacts/$artifact_id"
@@ -213,14 +213,14 @@ jobs:
           done < "$artifacts_file"
 
           echo "Finalize summary: total=$total_count accepted=$accepted_count pending=$pending_count failed=$failed_count skipped=$skipped_count"
-          echo "::notice title=Finalize Notarization Summary::total=$total_count accepted=$accepted_count pending=$pending_count failed=$failed_count skipped=$skipped_count"
+          echo "::notice title=Summary::total=$total_count accepted=$accepted_count pending=$pending_count failed=$failed_count skipped=$skipped_count"
           printf '%s\n' '' >> "$GITHUB_STEP_SUMMARY"
           printf '%s\n' "- Summary: total=$total_count accepted=$accepted_count pending=$pending_count failed=$failed_count skipped=$skipped_count" >> "$GITHUB_STEP_SUMMARY"
 
           if [ "$pending_count" -eq 0 ]; then
-            echo "::notice title=Finalize Notarization::All checked notarization submissions are complete or terminal."
+            echo "::notice title=Done::All checked notarization submissions are complete or terminal."
             echo "All checked notarization submissions are complete or terminal."
           else
-            echo "::notice title=Finalize Notarization::At least one notarization submission is still pending."
+            echo "::notice title=Pending::At least one notarization submission is still pending."
             echo "At least one notarization submission is still pending."
           fi
