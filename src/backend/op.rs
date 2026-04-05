@@ -249,7 +249,7 @@ impl Backend for OpBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, Defaults, LogConfig};
+    use crate::config::{Config, Defaults, LogConfig, UpdateConfig};
     use std::path::Path;
 
     #[test]
@@ -257,6 +257,7 @@ mod tests {
         let config = Config {
             defaults: Defaults::default(),
             log: LogConfig::default(),
+            updates: UpdateConfig::default(),
             projects: vec![],
         };
         let ctx = StoreContext {

@@ -333,13 +333,14 @@ impl Backend for BwBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, Defaults, LogConfig};
+    use crate::config::{Config, Defaults, LogConfig, UpdateConfig};
     use std::path::Path;
 
     fn test_store_context() -> StoreContext<'static> {
         let config = Box::leak(Box::new(Config {
             defaults: Defaults::default(),
             log: LogConfig::default(),
+            updates: UpdateConfig::default(),
             projects: vec![],
         }));
 

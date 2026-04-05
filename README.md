@@ -14,6 +14,7 @@ The tool is designed for local development workflows where projects keep a check
 - Migrates plaintext values out of `.env` into the configured backend
 - Supports per-project backend overrides via config
 - Supports trusted project-local overrides via `.pw-env.toml`
+- Automatically checks GitHub releases for newer `pw-env` versions
 
 ## Install
 
@@ -220,7 +221,22 @@ Top-level sections:
 - `[defaults.bw]` configures Bitwarden defaults such as `folder`, `organization`, and `item`
 - `[defaults.gpg]` configures `file_pattern` and `recipient`
 - `[log]` configures log level and optional log file path
+- `[updates]` configures automatic release checks
 - `[[projects]]` defines per-path overrides
+
+Automatic release checks:
+
+- Run on interactive commands except `pw-env export`
+- Check the latest GitHub release at most once per configured interval
+- Print a one-time notice per newer version until you upgrade or another release appears
+
+Example:
+
+```toml
+[updates]
+enabled = true
+check_interval_hours = 24
+```
 
 Project-local overrides:
 

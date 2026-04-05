@@ -3,11 +3,13 @@ mod config;
 mod env_file;
 mod migrate;
 mod output;
+mod release;
 mod resolve;
 mod shell;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use tracing::{debug, error, info};
 
@@ -96,6 +98,8 @@ fn main() {
 
     // Set up logging
     setup_logging(&config);
+
+    maybe_check_for_release_update(&cli.command, &config);
 
     if let Err(e) = run(cli, config) {
         error!("{e:#}");
@@ -246,6 +250,20 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
             print!("{}", config_template());
             Ok(())
         }
+    }
+}
+
+fn maybe_check_for_release_update(command: &Commands, config: &config::Config) {
+    if matches!(command, Commands::Export { .. }) {
+        return;
+    }
+
+    if !std::io::stderr().is_terminal() {
+        return;
+    }
+
+    if let Err(err) = release::maybe_check_for_update(config) {
+        debug!(error = %err, "automatic release check failed");
     }
 }
 
@@ -467,6 +485,12 @@ file_pattern = ".env.gpg"
 level = "info"
 # Log file path (optional, defaults to ~/.local/state/pw-manager-env/pw-env.log)
 # file = "~/.local/state/pw-manager-env/pw-env.log"
+
+[updates]
+# Automatically check GitHub releases for a newer pw-env version.
+enabled = true
+# Minimum time between automatic checks.
+check_interval_hours = 24
 
 # Per-project overrides
 # Matched by directory path prefix — most specific match wins

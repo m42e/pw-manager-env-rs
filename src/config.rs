@@ -28,7 +28,34 @@ pub struct Config {
     #[serde(default)]
     pub log: LogConfig,
     #[serde(default)]
+    pub updates: UpdateConfig,
+    #[serde(default)]
     pub projects: Vec<ProjectOverride>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct UpdateConfig {
+    #[serde(default = "default_updates_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_update_check_interval_hours")]
+    pub check_interval_hours: u64,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_updates_enabled(),
+            check_interval_hours: default_update_check_interval_hours(),
+        }
+    }
+}
+
+fn default_updates_enabled() -> bool {
+    true
+}
+
+fn default_update_check_interval_hours() -> u64 {
+    24
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -204,6 +231,7 @@ impl Config {
             Ok(Config {
                 defaults: Defaults::default(),
                 log: LogConfig::default(),
+                updates: UpdateConfig::default(),
                 projects: vec![],
             })
         }
@@ -694,6 +722,7 @@ mod tests {
         let config = Config {
             defaults: Defaults::default(),
             log: LogConfig::default(),
+            updates: UpdateConfig::default(),
             projects: vec![],
         };
         assert_eq!(config.defaults.backend, "op");
@@ -758,6 +787,7 @@ backend = "gpg"
         let config = Config {
             defaults: Defaults::default(),
             log: LogConfig::default(),
+            updates: UpdateConfig::default(),
             projects: vec![
                 ProjectOverride {
                     path: "/home/user/work".to_string(),
