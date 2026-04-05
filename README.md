@@ -6,16 +6,8 @@ The tool is designed for local development workflows where projects keep a check
 
 ## Documentation
 
-The interactive manual is published with GitHub Pages at [m42e.github.io/pw-manager-env-rs](https://m42e.github.io/pw-manager-env-rs/).
+The interactive manual is published with GitHub Pages at [m42e.de/pw-manager-env-rs](https://m42e.de/pw-manager-env-rs/).
 
-To preview the manual locally:
-
-```bash
-python3 -m venv .venv-docs
-source .venv-docs/bin/activate
-pip install -r docs/requirements.txt
-mkdocs serve
-```
 
 ## Features
 
@@ -35,19 +27,19 @@ mkdocs serve
 Install the latest matching prebuilt release:
 
 ```bash
-curl -fsSL https://m42e.github.io/pw-manager-env-rs/install.sh | bash
+curl -fsSL https://m42e.de/pw-manager-env-rs/install.sh | bash
 ```
 
 Install a specific release version:
 
 ```bash
-curl -fsSL https://m42e.github.io/pw-manager-env-rs/install.sh | bash -s -- --version v0.1.0
+curl -fsSL https://m42e.de/pw-manager-env-rs/install.sh | bash -s -- --version v0.1.0
 ```
 
 Install into a custom directory:
 
 ```bash
-curl -fsSL https://m42e.github.io/pw-manager-env-rs/install.sh | bash -s -- --dir "$HOME/.local/bin"
+curl -fsSL https://m42e.de/pw-manager-env-rs/install.sh | bash -s -- --dir "$HOME/.local/bin"
 ```
 
 The installer currently supports these prebuilt targets:
@@ -410,6 +402,15 @@ Common commands:
 cargo fmt
 cargo test
 cargo run -- check
+```
+
+To preview the manual locally:
+
+```bash
+python3 -m venv .venv-docs
+source .venv-docs/bin/activate
+pip install -r docs/requirements.txt
+mkdocs serve
 ```
 
 ## Release
