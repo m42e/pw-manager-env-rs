@@ -1,7 +1,12 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use tracing::debug;
+
+const PROJECT_OVERRIDE_FILE_NAME: &str = ".pw-env.toml";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
@@ -131,6 +136,26 @@ pub struct ProjectOverride {
     pub item: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct ProjectDirectoryOverride {
+    #[serde(default)]
+    pub backend: Option<String>,
+    #[serde(default)]
+    pub op: Option<OpConfig>,
+    #[serde(default)]
+    pub bw: Option<BwConfig>,
+    #[serde(default)]
+    pub gpg: Option<GpgConfig>,
+    #[serde(default)]
+    pub item: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct ApprovedProjectConfigs {
+    #[serde(default)]
+    approved_hashes: BTreeMap<String, String>,
+}
+
 impl Config {
     pub fn config_path() -> PathBuf {
         // Prefer XDG_CONFIG_HOME, then ~/.config (Unix convention for CLI tools)
@@ -163,13 +188,43 @@ impl Config {
         }
     }
 
+    pub fn load_for_dir(dir: &Path) -> Result<Self> {
+        let mut config = Self::load()?;
+
+        if let Some((project_dir, override_path)) = Self::project_override_file(dir) {
+            if let Some(local_override) = ProjectDirectoryOverride::load_if_approved(&override_path)? {
+                config.projects.push(ProjectOverride {
+                    path: project_dir.to_string_lossy().into_owned(),
+                    backend: local_override.backend,
+                    op: local_override.op,
+                    bw: local_override.bw,
+                    gpg: local_override.gpg,
+                    item: local_override.item,
+                });
+            }
+        }
+
+        Ok(config)
+    }
+
+    pub fn project_override_path(dir: &Path) -> Option<PathBuf> {
+        Self::project_override_file(dir).map(|(_, path)| path)
+    }
+
     /// Find a project override matching the given directory (exact match or parent match).
     pub fn project_for(&self, dir: &Path) -> Option<&ProjectOverride> {
-        let dir_str = dir.to_string_lossy();
-        self.projects.iter().find(|p| {
-            let project_path = shellexpand_tilde(&p.path);
-            dir_str.starts_with(project_path.as_ref())
-        })
+        self.projects
+            .iter()
+            .filter_map(|project| {
+                let project_path = expand_path(&project.path);
+                if dir.starts_with(&project_path) {
+                    Some((project_path.components().count(), project))
+                } else {
+                    None
+                }
+            })
+            .max_by_key(|(depth, _)| *depth)
+            .map(|(_, project)| project)
     }
 
     /// Resolve the effective backend name for a given directory.
@@ -216,15 +271,163 @@ impl Config {
     }
 }
 
-fn shellexpand_tilde(path: &str) -> std::borrow::Cow<'_, str> {
+impl Config {
+    fn project_override_file(dir: &Path) -> Option<(PathBuf, PathBuf)> {
+        let git_root = find_git_root(dir);
+        let mut current = dir.to_path_buf();
+
+        loop {
+            let candidate = current.join(PROJECT_OVERRIDE_FILE_NAME);
+            if candidate.exists() {
+                return Some((current, candidate));
+            }
+
+            if git_root.as_ref().is_none_or(|root| *root == current) {
+                break;
+            }
+
+            if !current.pop() {
+                break;
+            }
+        }
+
+        None
+    }
+}
+
+impl ProjectDirectoryOverride {
+    fn load_if_approved(path: &Path) -> Result<Option<Self>> {
+        let contents = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read project override from {}", path.display()))?;
+        let local_override: ProjectDirectoryOverride = toml::from_str(&contents)
+            .with_context(|| format!("Failed to parse project override from {}", path.display()))?;
+        let hash = sha256_hex(&contents);
+
+        let mut approvals = ApprovedProjectConfigs::load()?;
+        let previously_approved = approvals.approved_hash(path);
+
+        if previously_approved == Some(hash.as_str()) {
+            debug!("Loading approved project override from {}", path.display());
+            return Ok(Some(local_override));
+        }
+
+        if !io::stdin().is_terminal() {
+            let state = if previously_approved.is_some() {
+                "changed since its last approval"
+            } else {
+                "has not been approved yet"
+            };
+            eprintln!(
+                "pw-env: project override {} {}. Skipping it until you approve the current file contents in an interactive session.",
+                path.display(),
+                state
+            );
+            return Ok(None);
+        }
+
+        eprintln!("Project override found: {}", path.display());
+        if previously_approved.is_some() {
+            eprintln!("This file changed since the last approved version.");
+        } else {
+            eprintln!("This file can override pw-env settings for the current project.");
+        }
+        eprint!("Approve loading this file? [y/N] ");
+        io::stderr().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let answer = input.trim().to_ascii_lowercase();
+        if answer != "y" && answer != "yes" {
+            eprintln!("Skipping project override: {}", path.display());
+            return Ok(None);
+        }
+
+        approvals.approve(path, hash);
+        approvals.save()?;
+        Ok(Some(local_override))
+    }
+}
+
+impl ApprovedProjectConfigs {
+    fn load() -> Result<Self> {
+        let Some(path) = Self::path() else {
+            return Ok(Self::default());
+        };
+
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+
+        let contents = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read approval store from {}", path.display()))?;
+        serde_json::from_str(&contents)
+            .with_context(|| format!("Failed to parse approval store from {}", path.display()))
+    }
+
+    fn save(&self) -> Result<()> {
+        let Some(path) = Self::path() else {
+            return Ok(());
+        };
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create state directory {}", parent.display()))?;
+        }
+
+        let contents = serde_json::to_string_pretty(self)
+            .context("Failed to serialize approval store")?;
+        std::fs::write(&path, contents)
+            .with_context(|| format!("Failed to write approval store to {}", path.display()))
+    }
+
+    fn approve(&mut self, path: &Path, hash: String) {
+        self.approved_hashes.insert(normalize_path(path), hash);
+    }
+
+    fn approved_hash(&self, path: &Path) -> Option<&str> {
+        self.approved_hashes
+            .get(&normalize_path(path))
+            .map(String::as_str)
+    }
+
+    fn path() -> Option<PathBuf> {
+        dirs::state_dir()
+            .or_else(dirs::data_local_dir)
+            .map(|dir| dir.join("pw-manager-env").join("approved-project-configs.json"))
+    }
+}
+
+fn expand_path(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
-            return std::borrow::Cow::Owned(
-                home.join(rest).to_string_lossy().into_owned(),
-            );
+            return home.join(rest);
         }
     }
-    std::borrow::Cow::Borrowed(path)
+    PathBuf::from(path)
+}
+
+fn normalize_path(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn sha256_hex(contents: &str) -> String {
+    let digest = Sha256::digest(contents.as_bytes());
+    format!("{digest:x}")
+}
+
+fn find_git_root(dir: &Path) -> Option<PathBuf> {
+    let mut current = dir.to_path_buf();
+    loop {
+        if current.join(".git").exists() {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -293,5 +496,46 @@ backend = "gpg"
 
         let dir2 = Path::new("/home/user/other");
         assert_eq!(config.effective_backend(dir2), "op");
+    }
+
+    #[test]
+    fn test_project_for_prefers_most_specific_match() {
+        let config = Config {
+            defaults: Defaults::default(),
+            log: LogConfig::default(),
+            projects: vec![
+                ProjectOverride {
+                    path: "/home/user/work".to_string(),
+                    backend: Some("bw".to_string()),
+                    ..ProjectOverride::default()
+                },
+                ProjectOverride {
+                    path: "/home/user/work/service-a".to_string(),
+                    backend: Some("gpg".to_string()),
+                    ..ProjectOverride::default()
+                },
+            ],
+        };
+
+        let project = config
+            .project_for(Path::new("/home/user/work/service-a/api"))
+            .unwrap();
+        assert_eq!(project.backend.as_deref(), Some("gpg"));
+    }
+
+    #[test]
+    fn test_parse_project_directory_override() {
+        let toml_str = r#"
+backend = "op"
+item = "service-a-env"
+
+[op]
+vault = "Work"
+"#;
+
+        let local_override: ProjectDirectoryOverride = toml::from_str(toml_str).unwrap();
+        assert_eq!(local_override.backend.as_deref(), Some("op"));
+        assert_eq!(local_override.item.as_deref(), Some("service-a-env"));
+        assert_eq!(local_override.op.and_then(|op| op.vault), Some("Work".to_string()));
     }
 }
