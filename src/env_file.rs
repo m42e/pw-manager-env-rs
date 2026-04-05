@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use tracing::debug;
@@ -111,6 +112,14 @@ impl EnvFile {
             .collect()
     }
 
+    /// Get plaintext entries that are likely to contain secrets.
+    pub fn likely_secret_entries(&self) -> Vec<&EnvEntry> {
+        self.entries()
+            .into_iter()
+            .filter(|e| e.is_likely_secret())
+            .collect()
+    }
+
     /// Get entries that need resolution (empty or reference values).
     pub fn resolvable_entries(&self) -> Vec<&EnvEntry> {
         self.entries()
@@ -147,6 +156,15 @@ impl EnvFile {
 
 }
 
+impl EnvEntry {
+    pub fn is_likely_secret(&self) -> bool {
+        match &self.kind {
+            EntryKind::Plaintext(value) => is_likely_secret(&self.key, value),
+            _ => false,
+        }
+    }
+}
+
 fn strip_quotes(value: &str) -> String {
     if (value.starts_with('"') && value.ends_with('"'))
         || (value.starts_with('\'') && value.ends_with('\''))
@@ -167,6 +185,129 @@ fn classify_value(value: &str) -> EntryKind {
     } else {
         EntryKind::Plaintext(value.to_string())
     }
+}
+
+fn is_likely_secret(key: &str, value: &str) -> bool {
+    looks_like_secret_name(key)
+        || contains_embedded_credentials(value)
+        || has_common_secret_prefix(value)
+        || looks_like_high_entropy_secret(value)
+}
+
+fn looks_like_secret_name(key: &str) -> bool {
+    let normalized: String = key
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    let direct_patterns = [
+        "password",
+        "passwd",
+        "passphrase",
+        "secret",
+        "token",
+        "api_key",
+        "apikey",
+        "auth_token",
+        "refresh_token",
+        "client_secret",
+        "secret_key",
+        "private_key",
+        "access_key",
+        "jwt",
+    ];
+
+    if direct_patterns
+        .iter()
+        .any(|pattern| normalized.contains(pattern))
+    {
+        return true;
+    }
+
+    let segments: Vec<&str> = normalized
+        .split('_')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+
+    contains_segment_pair(&segments, "api", "key")
+        || contains_segment_pair(&segments, "auth", "key")
+        || contains_segment_pair(&segments, "auth", "token")
+        || contains_segment_pair(&segments, "client", "secret")
+        || contains_segment_pair(&segments, "refresh", "token")
+        || contains_segment_pair(&segments, "private", "key")
+        || contains_segment_pair(&segments, "access", "key")
+}
+
+fn contains_segment_pair(segments: &[&str], first: &str, second: &str) -> bool {
+    segments.windows(2).any(|window| window == [first, second])
+}
+
+fn contains_embedded_credentials(value: &str) -> bool {
+    let trimmed = value.trim();
+    let Some((_, remainder)) = trimmed.split_once("://") else {
+        return false;
+    };
+
+    let authority = remainder.split('/').next().unwrap_or(remainder);
+    let Some((userinfo, _)) = authority.rsplit_once('@') else {
+        return false;
+    };
+
+    let Some((username, password)) = userinfo.split_once(':') else {
+        return false;
+    };
+
+    !username.is_empty() && !password.is_empty()
+}
+
+fn has_common_secret_prefix(value: &str) -> bool {
+    let lower = value.trim().to_ascii_lowercase();
+    lower.starts_with("ghp_")
+        || lower.starts_with("github_pat_")
+        || lower.starts_with("glpat-")
+        || lower.starts_with("xoxb-")
+        || lower.starts_with("xoxp-")
+        || lower.starts_with("xoxs-")
+        || lower.starts_with("sk-")
+        || value.trim().starts_with("AKIA")
+}
+
+fn looks_like_high_entropy_secret(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.len() < 16 || trimmed.chars().any(char::is_whitespace) || trimmed.contains("://") {
+        return false;
+    }
+
+    if !trimmed.chars().all(|ch| {
+        ch.is_ascii_alphanumeric() || matches!(ch, '/' | '+' | '=' | '-' | '_' | '.')
+    }) {
+        return false;
+    }
+
+    let entropy = shannon_entropy(trimmed);
+    (trimmed.len() >= 20 && entropy >= 3.8) || (trimmed.len() >= 32 && entropy >= 3.4)
+}
+
+fn shannon_entropy(value: &str) -> f64 {
+    let mut counts: HashMap<u8, usize> = HashMap::new();
+    for byte in value.bytes() {
+        *counts.entry(byte).or_insert(0) += 1;
+    }
+
+    let len = value.len() as f64;
+    counts
+        .values()
+        .map(|count| {
+            let probability = *count as f64 / len;
+            -probability * probability.log2()
+        })
+        .sum()
 }
 
 #[cfg(test)]
@@ -210,5 +351,76 @@ mod tests {
         assert_eq!(strip_quotes("'hello'"), "hello");
         assert_eq!(strip_quotes("hello"), "hello");
         assert_eq!(strip_quotes("\"hello"), "\"hello");
+    }
+
+    #[test]
+    fn test_detects_secret_by_name() {
+        let entry = EnvEntry {
+            key: "API_KEY".to_string(),
+            raw_value: "dev-value".to_string(),
+            kind: EntryKind::Plaintext("dev-value".to_string()),
+        };
+
+        assert!(entry.is_likely_secret());
+    }
+
+    #[test]
+    fn test_detects_secret_by_entropy() {
+        let entry = EnvEntry {
+            key: "SESSION".to_string(),
+            raw_value: "Qx9Lpm7_aB2Nz8VwK4rTy1Hu".to_string(),
+            kind: EntryKind::Plaintext("Qx9Lpm7_aB2Nz8VwK4rTy1Hu".to_string()),
+        };
+
+        assert!(entry.is_likely_secret());
+    }
+
+    #[test]
+    fn test_detects_secret_in_url_credentials() {
+        let entry = EnvEntry {
+            key: "DATABASE_URL".to_string(),
+            raw_value: "postgres://app:s3cr3t@db.internal/app".to_string(),
+            kind: EntryKind::Plaintext("postgres://app:s3cr3t@db.internal/app".to_string()),
+        };
+
+        assert!(entry.is_likely_secret());
+    }
+
+    #[test]
+    fn test_ignores_plaintext_non_secret_setting() {
+        let entry = EnvEntry {
+            key: "LOG_LEVEL".to_string(),
+            raw_value: "debug".to_string(),
+            kind: EntryKind::Plaintext("debug".to_string()),
+        };
+
+        assert!(!entry.is_likely_secret());
+    }
+
+    #[test]
+    fn test_filters_likely_secret_entries() {
+        let env_file = EnvFile {
+            path: PathBuf::from(".env"),
+            lines: vec![
+                EnvLine::Entry(EnvEntry {
+                    key: "API_KEY".to_string(),
+                    raw_value: "dev-value".to_string(),
+                    kind: EntryKind::Plaintext("dev-value".to_string()),
+                }),
+                EnvLine::Entry(EnvEntry {
+                    key: "LOG_LEVEL".to_string(),
+                    raw_value: "debug".to_string(),
+                    kind: EntryKind::Plaintext("debug".to_string()),
+                }),
+            ],
+        };
+
+        let detected: Vec<&str> = env_file
+            .likely_secret_entries()
+            .into_iter()
+            .map(|entry| entry.key.as_str())
+            .collect();
+
+        assert_eq!(detected, vec!["API_KEY"]);
     }
 }

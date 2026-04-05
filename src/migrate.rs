@@ -16,19 +16,35 @@ pub fn migrate(dir: &Path, config: &Config) -> Result<()> {
     let plaintext_entries = env_file.plaintext_entries();
 
     if plaintext_entries.is_empty() {
-        eprintln!("No plaintext secrets found in .env — nothing to migrate.");
+        eprintln!("No plaintext values found in .env — nothing to migrate.");
         return Ok(());
     }
 
+    let likely_secret_count = plaintext_entries
+        .iter()
+        .filter(|entry| entry.is_likely_secret())
+        .count();
+
     eprintln!(
-        "Found {} plaintext secret(s) in {}:",
+        "Found {} plaintext value(s) in {}:",
         plaintext_entries.len(),
         env_path.display()
     );
+    if likely_secret_count > 0 {
+        eprintln!(
+            "{} of them look like secrets based on key names or secret-like values.",
+            likely_secret_count
+        );
+    }
     for entry in &plaintext_entries {
         // Show key and a masked value (first 3 chars + ***)
         let masked = mask_value(&entry.raw_value);
-        eprintln!("  {} = {}", entry.key, masked);
+        let label = if entry.is_likely_secret() {
+            "  [likely secret]"
+        } else {
+            ""
+        };
+        eprintln!("  {} = {}{}", entry.key, masked, label);
     }
     eprintln!();
 

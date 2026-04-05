@@ -8,6 +8,19 @@ use tracing::debug;
 
 const PROJECT_OVERRIDE_FILE_NAME: &str = ".pw-env.toml";
 
+#[derive(Debug, Clone)]
+pub struct ApprovedProjectConfigEntry {
+    pub path: PathBuf,
+    pub hash: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProjectOverrideApprovalStatus {
+    pub override_path: PathBuf,
+    pub approved_hash: Option<String>,
+    pub current_hash: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default)]
@@ -211,6 +224,55 @@ impl Config {
         Self::project_override_file(dir).map(|(_, path)| path)
     }
 
+    pub fn approval_store_path() -> Option<PathBuf> {
+        ApprovedProjectConfigs::path()
+    }
+
+    pub fn approved_project_configs() -> Result<Vec<ApprovedProjectConfigEntry>> {
+        Ok(ApprovedProjectConfigs::load()?.entries())
+    }
+
+    pub fn project_override_approval_status(path: &Path) -> Result<ProjectOverrideApprovalStatus> {
+        let override_path = resolve_project_override_target(path)?;
+        let approvals = ApprovedProjectConfigs::load()?;
+        let current_hash = if override_path.exists() {
+            Some(hash_file(&override_path)?)
+        } else {
+            None
+        };
+
+        Ok(ProjectOverrideApprovalStatus {
+            approved_hash: approvals.approved_hash(&override_path).map(ToOwned::to_owned),
+            override_path,
+            current_hash,
+        })
+    }
+
+    pub fn approve_project_override(path: &Path) -> Result<ApprovedProjectConfigEntry> {
+        let override_path = resolve_project_override_target(path)?;
+        validate_project_override(&override_path)?;
+        let hash = hash_file(&override_path)?;
+
+        let mut approvals = ApprovedProjectConfigs::load()?;
+        approvals.approve(&override_path, hash.clone());
+        approvals.save()?;
+
+        Ok(ApprovedProjectConfigEntry {
+            path: override_path,
+            hash,
+        })
+    }
+
+    pub fn revoke_project_override_approval(path: &Path) -> Result<bool> {
+        let override_path = resolve_project_override_target(path)?;
+        let mut approvals = ApprovedProjectConfigs::load()?;
+        let removed = approvals.revoke(&override_path);
+        if removed {
+            approvals.save()?;
+        }
+        Ok(removed)
+    }
+
     /// Find a project override matching the given directory (exact match or parent match).
     pub fn project_for(&self, dir: &Path) -> Option<&ProjectOverride> {
         self.projects
@@ -354,11 +416,15 @@ impl ApprovedProjectConfigs {
             return Ok(Self::default());
         };
 
+        Self::load_from_path(&path)
+    }
+
+    fn load_from_path(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
         }
 
-        let contents = std::fs::read_to_string(&path)
+        let contents = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read approval store from {}", path.display()))?;
         serde_json::from_str(&contents)
             .with_context(|| format!("Failed to parse approval store from {}", path.display()))
@@ -369,6 +435,10 @@ impl ApprovedProjectConfigs {
             return Ok(());
         };
 
+        self.save_to_path(&path)
+    }
+
+    fn save_to_path(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create state directory {}", parent.display()))?;
@@ -376,7 +446,7 @@ impl ApprovedProjectConfigs {
 
         let contents = serde_json::to_string_pretty(self)
             .context("Failed to serialize approval store")?;
-        std::fs::write(&path, contents)
+        std::fs::write(path, contents)
             .with_context(|| format!("Failed to write approval store to {}", path.display()))
     }
 
@@ -388,6 +458,20 @@ impl ApprovedProjectConfigs {
         self.approved_hashes
             .get(&normalize_path(path))
             .map(String::as_str)
+    }
+
+    fn revoke(&mut self, path: &Path) -> bool {
+        self.approved_hashes.remove(&normalize_path(path)).is_some()
+    }
+
+    fn entries(&self) -> Vec<ApprovedProjectConfigEntry> {
+        self.approved_hashes
+            .iter()
+            .map(|(path, hash)| ApprovedProjectConfigEntry {
+                path: PathBuf::from(path),
+                hash: hash.clone(),
+            })
+            .collect()
     }
 
     fn path() -> Option<PathBuf> {
@@ -413,6 +497,48 @@ fn normalize_path(path: &Path) -> String {
         .into_owned()
 }
 
+fn resolve_project_override_target(path: &Path) -> Result<PathBuf> {
+    let candidate = if path.is_dir() {
+        Config::project_override_path(path)
+            .ok_or_else(|| anyhow::anyhow!(
+                "No {} file found for {}",
+                PROJECT_OVERRIDE_FILE_NAME,
+                path.display()
+            ))?
+    } else {
+        path.to_path_buf()
+    };
+
+    if candidate.file_name().and_then(|name| name.to_str()) != Some(PROJECT_OVERRIDE_FILE_NAME) {
+        anyhow::bail!(
+            "Expected a {} file or a directory containing one: {}",
+            PROJECT_OVERRIDE_FILE_NAME,
+            path.display()
+        );
+    }
+
+    if !candidate.exists() {
+        anyhow::bail!("Project override file not found: {}", candidate.display());
+    }
+
+    candidate
+        .canonicalize()
+        .with_context(|| format!("Failed to resolve {}", candidate.display()))
+}
+
+fn hash_file(path: &Path) -> Result<String> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read project override from {}", path.display()))?;
+    Ok(sha256_hex(&contents))
+}
+
+fn validate_project_override(path: &Path) -> Result<ProjectDirectoryOverride> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read project override from {}", path.display()))?;
+    toml::from_str(&contents)
+        .with_context(|| format!("Failed to parse project override from {}", path.display()))
+}
+
 fn sha256_hex(contents: &str) -> String {
     let digest = Sha256::digest(contents.as_bytes());
     format!("{digest:x}")
@@ -433,6 +559,8 @@ fn find_git_root(dir: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn test_default_config() {
@@ -537,5 +665,52 @@ vault = "Work"
         assert_eq!(local_override.backend.as_deref(), Some("op"));
         assert_eq!(local_override.item.as_deref(), Some("service-a-env"));
         assert_eq!(local_override.op.and_then(|op| op.vault), Some("Work".to_string()));
+    }
+
+    #[test]
+    fn test_approval_store_round_trip_and_revoke() {
+        let test_dir = unique_test_dir("approval-store");
+        let override_path = test_dir.join(PROJECT_OVERRIDE_FILE_NAME);
+        let store_path = test_dir.join("approved-project-configs.json");
+
+        fs::create_dir_all(&test_dir).unwrap();
+        fs::write(&override_path, "backend = \"op\"\n").unwrap();
+
+        let approved_hash = hash_file(&override_path).unwrap();
+        let mut approvals = ApprovedProjectConfigs::default();
+        approvals.approve(&override_path, approved_hash.clone());
+        approvals.save_to_path(&store_path).unwrap();
+
+        let loaded = ApprovedProjectConfigs::load_from_path(&store_path).unwrap();
+        assert_eq!(loaded.approved_hash(&override_path), Some(approved_hash.as_str()));
+        assert_eq!(loaded.entries().len(), 1);
+
+        let mut loaded = loaded;
+        assert!(loaded.revoke(&override_path));
+        assert_eq!(loaded.approved_hash(&override_path), None);
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_validate_project_override() {
+        let test_dir = unique_test_dir("validate-project-override");
+        let override_path = test_dir.join(PROJECT_OVERRIDE_FILE_NAME);
+        fs::create_dir_all(&test_dir).unwrap();
+        fs::write(&override_path, "backend = \"op\"\n[op]\nvault = \"Work\"\n").unwrap();
+
+        let parsed = validate_project_override(&override_path).unwrap();
+        assert_eq!(parsed.backend.as_deref(), Some("op"));
+        assert_eq!(parsed.op.and_then(|config| config.vault), Some("Work".to_string()));
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("pw-env-{name}-{}-{nonce}", std::process::id()))
     }
 }

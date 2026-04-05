@@ -28,7 +28,7 @@ __pw_env_hook() {
     # Check if there's a .env file in the current directory
     if [ -f ".env" ]; then
         local _pw_env_output
-        _pw_env_output="$(pw-env export "$PWD" --shell bash 2>/dev/null)"
+        _pw_env_output="$(pw-env export "$PWD" --shell bash)"
         if [ -n "$_pw_env_output" ]; then
             eval "$_pw_env_output"
         fi
@@ -73,7 +73,7 @@ __pw_env_hook() {
     # Check if there's a .env file in the current directory
     if [[ -f ".env" ]]; then
         local _pw_env_output
-        _pw_env_output="$(pw-env export "$PWD" --shell zsh 2>/dev/null)"
+        _pw_env_output="$(pw-env export "$PWD" --shell zsh)"
         if [[ -n "$_pw_env_output" ]]; then
             eval "$_pw_env_output"
         fi
@@ -107,7 +107,7 @@ function __pw_env_hook --on-variable PWD
 
     # Check if there's a .env file in the current directory
     if test -f ".env"
-        set -l _pw_env_output (pw-env export $PWD --shell fish 2>/dev/null)
+        set -l _pw_env_output (pw-env export $PWD --shell fish)
         if test -n "$_pw_env_output"
             eval $_pw_env_output
         end
@@ -130,6 +130,7 @@ mod tests {
         assert!(hook.contains("cd()"));
         assert!(hook.contains("pw-env export"));
         assert!(hook.contains("__pw_env_hook"));
+        assert!(!hook.contains("2>/dev/null"));
     }
 
     #[test]
@@ -137,6 +138,7 @@ mod tests {
         let hook = generate_hook("zsh");
         assert!(hook.contains("chpwd"));
         assert!(hook.contains("pw-env export"));
+        assert!(!hook.contains("2>/dev/null"));
     }
 
     #[test]
@@ -144,6 +146,7 @@ mod tests {
         let hook = generate_hook("fish");
         assert!(hook.contains("--on-variable PWD"));
         assert!(hook.contains("pw-env export"));
+        assert!(!hook.contains("2>/dev/null"));
     }
 
     #[test]

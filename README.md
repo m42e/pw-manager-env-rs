@@ -10,7 +10,7 @@ The tool is designed for local development workflows where projects keep a check
 - Supports explicit `op://...` and `bw://...` references per variable
 - Supports GPG-backed secret files such as `.env.gpg`
 - Generates shell hooks for `bash`, `zsh`, and `fish`
-- Warns when plaintext secrets are still present in `.env`
+- Warns when likely plaintext secrets are still present in `.env`
 - Migrates plaintext values out of `.env` into the configured backend
 - Supports per-project backend overrides via config
 - Supports trusted project-local overrides via `.pw-env.toml`
@@ -92,6 +92,8 @@ Value handling works like this:
 - `KEY=op://vault/item/field` resolves through 1Password
 - `KEY=bw://[folder/]item/field` resolves through Bitwarden
 - `KEY=plaintext` is treated as plaintext and left as-is until migrated
+
+Warnings for plaintext secrets use a simple heuristic based on secret-like key names such as `API_KEY` or `PASSWORD`, embedded credentials in URLs, and high-entropy token-like values.
 
 For the GPG backend, empty keys are resolved from an encrypted env file such as `.env.gpg`.
 
@@ -175,6 +177,7 @@ pw-env init fish | source
 Add that to your fish config.
 
 The generated hooks unset previously exported variables when you leave a directory and load new ones when entering a directory containing `.env`.
+Warnings from `pw-env export` are written to stderr, so they remain visible when the shell hook auto-loads a directory.
 
 ## Backend Resolution Model
 
@@ -269,6 +272,10 @@ Main subcommands:
 - `pw-env load [dir]` prints a human-readable resolution summary and export statements
 - `pw-env migrate [dir]` interactively stores plaintext `.env` values in the configured backend and clears them from `.env`
 - `pw-env check` checks available backends and active configuration
+- `pw-env approvals list` lists approved project-local override files and hashes
+- `pw-env approvals approve <path>` stores the current hash for a `.pw-env.toml` file or project directory after validating the file
+- `pw-env approvals show [path]` shows the current and approved hash for a `.pw-env.toml` file or project directory
+- `pw-env approvals revoke <path>` removes a stored approval for a `.pw-env.toml` file or project directory
 - `pw-env config-template` prints the default config template
 
 ## Migration Workflow

@@ -52,8 +52,34 @@ enum Commands {
     },
     /// Check availability of password manager backends
     Check,
+    /// Manage approved project-local override hashes
+    Approvals {
+        #[command(subcommand)]
+        command: ApprovalCommands,
+    },
     /// Print the default configuration file template
     ConfigTemplate,
+}
+
+#[derive(Subcommand)]
+enum ApprovalCommands {
+    /// List approved project override files and hashes
+    List,
+    /// Approve the current contents of a project override file or directory
+    Approve {
+        /// Path to a .pw-env.toml file or a directory containing one
+        path: PathBuf,
+    },
+    /// Show the approval status for a project override file or directory
+    Show {
+        /// Path to a .pw-env.toml file or a directory containing one
+        path: Option<PathBuf>,
+    },
+    /// Remove the approved hash for a project override file or directory
+    Revoke {
+        /// Path to a .pw-env.toml file or a directory containing one
+        path: PathBuf,
+    },
 }
 
 fn main() {
@@ -103,12 +129,11 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
 
             let env_file = env_file::EnvFile::parse(&env_path)?;
 
-            // Check for plaintext entries and warn on stderr
-            let plaintext = env_file.plaintext_entries();
-            if !plaintext.is_empty() {
+            let likely_secrets = env_file.likely_secret_entries();
+            if !likely_secrets.is_empty() {
                 eprintln!(
-                    "pw-env: warning: {} plaintext secret(s) found in .env. Run `pw-env migrate` to secure them.",
-                    plaintext.len()
+                    "pw-env: warning: likely plaintext secrets found in .env: {}. Run `pw-env migrate` to secure them.",
+                    summarize_entry_keys(&likely_secrets)
                 );
             }
 
@@ -149,13 +174,25 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
             eprintln!("Backend: {}", config.effective_backend(&dir));
             eprintln!();
 
+            let likely_secrets = env_file.likely_secret_entries();
+            if !likely_secrets.is_empty() {
+                eprintln!(
+                    "Warning: likely plaintext secrets found in .env: {}",
+                    summarize_entry_keys(&likely_secrets)
+                );
+                eprintln!();
+            }
+
             // Show entry classification
             for entry in env_file.entries() {
                 let status = match &entry.kind {
                     env_file::EntryKind::Empty => "  (resolve from backend)".to_string(),
                     env_file::EntryKind::OpReference(r) => format!("  (1Password: {r})"),
                     env_file::EntryKind::BwReference(r) => format!("  (Bitwarden: {r})"),
-                    env_file::EntryKind::Plaintext(_) => "  ⚠ PLAINTEXT (run `pw-env migrate`)".to_string(),
+                    env_file::EntryKind::Plaintext(_) if entry.is_likely_secret() => {
+                        "  ⚠ PLAINTEXT SECRET (run `pw-env migrate`)".to_string()
+                    }
+                    env_file::EntryKind::Plaintext(_) => "  (plaintext value)".to_string(),
                 };
                 eprintln!("  {}{}", entry.key, status);
             }
@@ -189,10 +226,32 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
             Ok(())
         }
 
+        Commands::Approvals { command } => handle_approvals(command),
+
         Commands::ConfigTemplate => {
             print!("{}", config_template());
             Ok(())
         }
+    }
+}
+
+fn summarize_entry_keys(entries: &[&env_file::EnvEntry]) -> String {
+    const MAX_VISIBLE_KEYS: usize = 3;
+
+    let mut keys: Vec<&str> = entries.iter().map(|entry| entry.key.as_str()).collect();
+    keys.sort_unstable();
+
+    let visible = keys
+        .iter()
+        .take(MAX_VISIBLE_KEYS)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    if keys.len() > MAX_VISIBLE_KEYS {
+        format!("{} (+{} more)", visible, keys.len() - MAX_VISIBLE_KEYS)
+    } else {
+        visible
     }
 }
 
@@ -284,6 +343,70 @@ fn check_config(config: &config::Config, dir: &std::path::Path) {
     } else {
         eprintln!("Configuration: not found (using defaults)");
         eprintln!("  Create one with: pw-env config-template > {}", config_path.display());
+    }
+}
+
+fn handle_approvals(command: ApprovalCommands) -> Result<()> {
+    match command {
+        ApprovalCommands::List => {
+            if let Some(store_path) = config::Config::approval_store_path() {
+                eprintln!("Approval store: {}", store_path.display());
+            }
+
+            let approvals = config::Config::approved_project_configs()?;
+            if approvals.is_empty() {
+                eprintln!("No approved project override files.");
+                return Ok(());
+            }
+
+            eprintln!("Approved project override files:");
+            for approval in approvals {
+                eprintln!("  {}  {}", approval.hash, approval.path.display());
+            }
+            Ok(())
+        }
+        ApprovalCommands::Approve { path } => {
+            let approval = config::Config::approve_project_override(&path)?;
+            eprintln!("Approved project override: {}", approval.path.display());
+            eprintln!("Stored hash: {}", approval.hash);
+            Ok(())
+        }
+        ApprovalCommands::Show { path } => {
+            let target = match path {
+                Some(path) => path,
+                None => resolve_dir(None)?,
+            };
+            let status = config::Config::project_override_approval_status(&target)?;
+
+            eprintln!("Project override: {}", status.override_path.display());
+            match status.current_hash.as_deref() {
+                Some(hash) => eprintln!("Current hash: {hash}"),
+                None => eprintln!("Current hash: unavailable"),
+            }
+            match status.approved_hash.as_deref() {
+                Some(hash) => eprintln!("Approved hash: {hash}"),
+                None => eprintln!("Approved hash: none"),
+            }
+
+            let state = match (&status.current_hash, &status.approved_hash) {
+                (Some(current), Some(approved)) if current == approved => "approved",
+                (Some(_), Some(_)) => "changed since approval",
+                (Some(_), None) => "not approved",
+                (None, Some(_)) => "approved file missing",
+                (None, None) => "unknown",
+            };
+            eprintln!("Status: {state}");
+            Ok(())
+        }
+        ApprovalCommands::Revoke { path } => {
+            let revoked = config::Config::revoke_project_override_approval(&path)?;
+            if revoked {
+                eprintln!("Revoked approval for {}", path.display());
+            } else {
+                eprintln!("No approval entry found for {}", path.display());
+            }
+            Ok(())
+        }
     }
 }
 
