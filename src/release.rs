@@ -1,15 +1,24 @@
 use crate::config;
 use anyhow::{Context, Result};
+use flate2::read::GzDecoder;
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use std::fs::File;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tar::Archive;
+use tempfile::TempDir;
+#[cfg(target_os = "windows")]
+use zip::ZipArchive;
 
 const RELEASE_CHECK_STATE_FILE: &str = "release-check.json";
+const GITHUB_OWNER: &str = "m42e";
 const GITHUB_REPO: &str = "pw-manager-env-rs";
 const RELEASE_API_URL: &str = "https://api.github.com/repos/m42e/pw-manager-env-rs/releases/latest";
 const RELEASES_URL: &str = "https://github.com/m42e/pw-manager-env-rs/releases/latest";
 const REQUEST_TIMEOUT_SECS: u64 = 2;
+const DOWNLOAD_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct ReleaseCheckState {
@@ -27,6 +36,26 @@ struct GithubRelease {
 struct ReleaseInfo {
     version: String,
     html_url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveFormat {
+    TarGz,
+    #[cfg(target_os = "windows")]
+    Zip,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReleaseAsset {
+    target: &'static str,
+    archive_format: ArchiveFormat,
+    binary_name: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedRelease {
+    tag: String,
+    version: String,
 }
 
 pub fn maybe_check_for_update(config: &config::Config) -> Result<()> {
@@ -72,11 +101,54 @@ pub fn maybe_check_for_update(config: &config::Config) -> Result<()> {
     state.save(&state_path)
 }
 
+pub fn update(requested_version: Option<&str>) -> Result<()> {
+    let current_version = env!("CARGO_PKG_VERSION");
+    let release = resolve_release(requested_version)?;
+
+    if release.version == current_version {
+        eprintln!("pw-env is already at v{}", current_version);
+        return Ok(());
+    }
+
+    let asset = detect_release_asset()?;
+    let archive_name = release_archive_name(&release.tag, &asset);
+    let download_url = release_download_url(&release.tag, &archive_name);
+    let current_exe =
+        std::env::current_exe().context("failed to determine the current executable path")?;
+    let tempdir = tempfile::Builder::new()
+        .prefix("pw-env-update-")
+        .tempdir()
+        .context("failed to create a temporary directory for the update")?;
+    let archive_path = tempdir.path().join(&archive_name);
+
+    eprintln!(
+        "pw-env: downloading v{} for {}",
+        release.version, asset.target
+    );
+    download_file(&download_url, &archive_path)?;
+
+    let extracted_binary_path = extract_binary_from_archive(&archive_path, &tempdir, &asset)
+        .with_context(|| format!("failed to extract {}", archive_name))?;
+
+    self_replace::self_replace(&extracted_binary_path).with_context(|| {
+        format!(
+            "failed to replace the current binary at {}",
+            current_exe.display()
+        )
+    })?;
+
+    eprintln!(
+        "pw-env: updated {} from v{} to v{}",
+        current_exe.display(),
+        current_version,
+        release.version
+    );
+
+    Ok(())
+}
+
 fn fetch_latest_release() -> Result<ReleaseInfo> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
-        .build()
-        .context("failed to build release check HTTP client")?;
+    let client = http_client(Duration::from_secs(REQUEST_TIMEOUT_SECS))?;
 
     let release = client
         .get(RELEASE_API_URL)
@@ -99,6 +171,195 @@ fn fetch_latest_release() -> Result<ReleaseInfo> {
     Ok(ReleaseInfo { version, html_url })
 }
 
+fn resolve_release(requested_version: Option<&str>) -> Result<ResolvedRelease> {
+    match requested_version {
+        None => {
+            let latest = fetch_latest_release()?;
+            Ok(ResolvedRelease {
+                tag: format!("v{}", latest.version),
+                version: latest.version,
+            })
+        }
+        Some(version) if version.trim().eq_ignore_ascii_case("latest") => {
+            let latest = fetch_latest_release()?;
+            Ok(ResolvedRelease {
+                tag: format!("v{}", latest.version),
+                version: latest.version,
+            })
+        }
+        Some(version) => {
+            let tag = normalize_tag(version);
+            let normalized_version = normalize_version(&tag)?;
+            Ok(ResolvedRelease {
+                tag,
+                version: normalized_version,
+            })
+        }
+    }
+}
+
+fn detect_release_asset() -> Result<ReleaseAsset> {
+    detect_release_asset_impl()
+}
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+fn detect_release_asset_impl() -> Result<ReleaseAsset> {
+    Ok(ReleaseAsset {
+        target: "x86_64-pc-windows-msvc",
+        archive_format: ArchiveFormat::Zip,
+        binary_name: "pw-env.exe",
+    })
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn detect_release_asset_impl() -> Result<ReleaseAsset> {
+    Ok(ReleaseAsset {
+        target: "aarch64-apple-darwin",
+        archive_format: ArchiveFormat::TarGz,
+        binary_name: "pw-env",
+    })
+}
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+fn detect_release_asset_impl() -> Result<ReleaseAsset> {
+    Ok(ReleaseAsset {
+        target: "x86_64-apple-darwin",
+        archive_format: ArchiveFormat::TarGz,
+        binary_name: "pw-env",
+    })
+}
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+fn detect_release_asset_impl() -> Result<ReleaseAsset> {
+    Ok(ReleaseAsset {
+        target: "aarch64-unknown-linux-gnu",
+        archive_format: ArchiveFormat::TarGz,
+        binary_name: "pw-env",
+    })
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn detect_release_asset_impl() -> Result<ReleaseAsset> {
+    Ok(ReleaseAsset {
+        target: "x86_64-unknown-linux-gnu",
+        archive_format: ArchiveFormat::TarGz,
+        binary_name: "pw-env",
+    })
+}
+
+#[cfg(not(any(
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "macos", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+)))]
+fn detect_release_asset_impl() -> Result<ReleaseAsset> {
+    Err(anyhow::anyhow!(
+        "self-update is not supported for this platform"
+    ))
+}
+
+fn release_archive_name(tag: &str, asset: &ReleaseAsset) -> String {
+    format!(
+        "pw-env-{tag}-{}.{}",
+        asset.target,
+        asset.archive_format.extension()
+    )
+}
+
+fn release_download_url(tag: &str, archive_name: &str) -> String {
+    format!(
+        "https://github.com/{}/{}/releases/download/{}/{}",
+        GITHUB_OWNER, GITHUB_REPO, tag, archive_name
+    )
+}
+
+fn download_file(url: &str, destination: &Path) -> Result<()> {
+    let client = http_client(Duration::from_secs(DOWNLOAD_TIMEOUT_SECS))?;
+    let mut response = client
+        .get(url)
+        .header(reqwest::header::USER_AGENT, user_agent())
+        .send()
+        .with_context(|| format!("failed to download {}", url))?
+        .error_for_status()
+        .with_context(|| format!("release download returned an error for {}", url))?;
+
+    let mut file = File::create(destination)
+        .with_context(|| format!("failed to create {}", destination.display()))?;
+    io::copy(&mut response, &mut file)
+        .with_context(|| format!("failed to write {}", destination.display()))?;
+    Ok(())
+}
+
+fn extract_binary_from_archive(
+    archive_path: &Path,
+    tempdir: &TempDir,
+    asset: &ReleaseAsset,
+) -> Result<PathBuf> {
+    let extracted_binary_path = tempdir.path().join(asset.binary_name);
+
+    match asset.archive_format {
+        ArchiveFormat::TarGz => {
+            let archive_file = File::open(archive_path)
+                .with_context(|| format!("failed to open {}", archive_path.display()))?;
+            let decoder = GzDecoder::new(archive_file);
+            let mut archive = Archive::new(decoder);
+
+            for entry in archive.entries().context("failed to read tar archive")? {
+                let mut entry = entry.context("failed to read tar archive entry")?;
+                let entry_path = entry
+                    .path()
+                    .context("failed to read tar archive entry path")?;
+                if entry_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    == Some(asset.binary_name)
+                {
+                    entry
+                        .unpack(&extracted_binary_path)
+                        .with_context(|| {
+                            format!(
+                                "failed to unpack {} to {}",
+                                asset.binary_name,
+                                extracted_binary_path.display()
+                            )
+                        })?;
+                    return Ok(extracted_binary_path);
+                }
+            }
+        }
+        #[cfg(target_os = "windows")]
+        ArchiveFormat::Zip => {
+            let archive_file = File::open(archive_path)
+                .with_context(|| format!("failed to open {}", archive_path.display()))?;
+            let mut archive =
+                ZipArchive::new(archive_file).context("failed to read zip archive")?;
+
+            for index in 0..archive.len() {
+                let mut entry = archive
+                    .by_index(index)
+                    .context("failed to read zip archive entry")?;
+                let entry_name = entry.name().replace('\\', "/");
+                if entry_name.rsplit('/').next() == Some(asset.binary_name) {
+                    let mut output = File::create(&extracted_binary_path).with_context(|| {
+                        format!("failed to create {}", extracted_binary_path.display())
+                    })?;
+                    io::copy(&mut entry, &mut output).with_context(|| {
+                        format!("failed to unpack {}", asset.binary_name)
+                    })?;
+                    return Ok(extracted_binary_path);
+                }
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "archive did not contain {}",
+        asset.binary_name
+    ))
+}
+
 fn is_newer_release(latest_version: &str) -> Result<bool> {
     let current = Version::parse(env!("CARGO_PKG_VERSION"))
         .context("failed to parse the current application version")?;
@@ -113,8 +374,34 @@ fn normalize_version(tag_name: &str) -> Result<String> {
     Ok(version.to_string())
 }
 
+fn normalize_tag(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.starts_with('v') {
+        trimmed.to_string()
+    } else {
+        format!("v{trimmed}")
+    }
+}
+
+fn http_client(timeout: Duration) -> Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+        .context("failed to build release HTTP client")
+}
+
 fn user_agent() -> String {
     format!("{}/{}", GITHUB_REPO, env!("CARGO_PKG_VERSION"))
+}
+
+impl ArchiveFormat {
+    fn extension(self) -> &'static str {
+        match self {
+            ArchiveFormat::TarGz => "tar.gz",
+            #[cfg(target_os = "windows")]
+            ArchiveFormat::Zip => "zip",
+        }
+    }
 }
 
 fn state_path() -> Option<PathBuf> {
@@ -189,8 +476,32 @@ mod tests {
     }
 
     #[test]
+    fn adds_v_prefix_to_requested_tags() {
+        assert_eq!(normalize_tag("1.2.3"), "v1.2.3");
+    }
+
+    #[test]
+    fn keeps_existing_v_prefix_on_requested_tags() {
+        assert_eq!(normalize_tag("v1.2.3"), "v1.2.3");
+    }
+
+    #[test]
     fn rejects_invalid_release_tags() {
         assert!(normalize_version("latest").is_err());
+    }
+
+    #[test]
+    fn release_archive_name_matches_installer_convention() {
+        let asset = ReleaseAsset {
+            target: "x86_64-apple-darwin",
+            archive_format: ArchiveFormat::TarGz,
+            binary_name: "pw-env",
+        };
+
+        assert_eq!(
+            release_archive_name("v1.2.3", &asset),
+            "pw-env-v1.2.3-x86_64-apple-darwin.tar.gz"
+        );
     }
 
     #[test]
