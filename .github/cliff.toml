@@ -1,3 +1,7 @@
+[remote.github]
+owner = "m42e"
+repo = "pw-manager-env-rs"
+
 [changelog]
 header = ""
 body = """
