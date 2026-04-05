@@ -16,6 +16,8 @@ permissions:
 env:
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
   BINARY_NAME: pw-env
+  MACOS_SIGNING_SECRETS_PRESENT: ${{ secrets.APPLE_CERT_BASE64 != '' && secrets.APPLE_CERT_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
+  MACOS_NOTARIZATION_SECRETS_PRESENT: ${{ secrets.APPLE_ID != '' && secrets.APPLE_APP_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
 
 jobs:
   build:
@@ -71,6 +73,81 @@ jobs:
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
 
+      - name: Prepare Apple signing keychain
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERT_BASE64: ${{ secrets.APPLE_CERT_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target }}
+        run: |
+          if [ "$MACOS_SIGNING_SECRETS_PRESENT" != "true" ]; then
+            echo "Apple signing secrets not configured; skipping macOS signing setup."
+            exit 0
+          fi
+
+          cert_path="$RUNNER_TEMP/apple-signing-cert.p12"
+          keychain_path="$RUNNER_TEMP/pw-env-signing-${{ matrix.target }}.keychain-db"
+
+          printf '%s' "$APPLE_CERT_BASE64" | base64 --decode > "$cert_path" 2>/dev/null || \
+            printf '%s' "$APPLE_CERT_BASE64" | base64 -D > "$cert_path"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security default-keychain -s "$keychain_path"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security import "$cert_path" -k "$keychain_path" -P "$APPLE_CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$keychain_path"
+
+          echo "PW_ENV_TEMP_KEYCHAIN=$keychain_path" >> "$GITHUB_ENV"
+
+      - name: Sign macOS binary
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          if [ "$MACOS_SIGNING_SECRETS_PRESENT" != "true" ]; then
+            echo "Apple signing secrets not configured; leaving macOS binary unsigned."
+            exit 0
+          fi
+
+          binary_path="target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          codesign --force --options runtime --timestamp \
+            --sign "$APPLE_SIGNING_IDENTITY" \
+            "$binary_path"
+          codesign --verify --verbose=2 "$binary_path"
+          spctl -a -vv "$binary_path"
+
+      - name: Notarize macOS binary
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ "$MACOS_SIGNING_SECRETS_PRESENT" != "true" ]; then
+            echo "Apple signing secrets not configured; skipping notarization."
+            exit 0
+          fi
+
+          if [ "$MACOS_NOTARIZATION_SECRETS_PRESENT" != "true" ]; then
+            echo "Apple notarization secrets not configured; skipping notarization."
+            exit 0
+          fi
+
+          binary_path="target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          submission_path="$RUNNER_TEMP/pw-env-${RELEASE_TAG}-${{ matrix.target }}-notarize.zip"
+
+          ditto -c -k --keepParent "$binary_path" "$submission_path"
+          xcrun notarytool submit "$submission_path" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+
       - name: Package (unix)
         if: matrix.archive == 'tar.gz'
         run: |
@@ -88,6 +165,14 @@ jobs:
         with:
           name: pw-env-${{ matrix.target }}
           path: pw-env-${{ env.RELEASE_TAG }}-${{ matrix.target }}.*
+
+      - name: Clean up Apple signing keychain
+        if: runner.os == 'macOS' && always()
+        shell: bash
+        run: |
+          if [ -n "${PW_ENV_TEMP_KEYCHAIN:-}" ] && [ -f "$PW_ENV_TEMP_KEYCHAIN" ]; then
+            security delete-keychain "$PW_ENV_TEMP_KEYCHAIN"
+          fi
 
   publish:
     name: Publish release
