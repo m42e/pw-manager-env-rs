@@ -14,6 +14,7 @@ The tool is designed for local development workflows where projects keep a check
 - Migrates plaintext values out of `.env` into the configured backend
 - Supports per-project backend overrides via config
 - Supports trusted project-local overrides via `.pw-env.toml`
+- Requires approval before a project `.env` can trigger secret fetches, keyed by project and `.env` hash
 - Automatically checks GitHub releases for newer `pw-env` versions
 
 ## Install
@@ -154,6 +155,8 @@ For one-off use:
 eval "$(pw-env export . --shell bash)"
 ```
 
+The first time a project `.env` would fetch credentials, `pw-env` asks for approval. By default the approval is tied to the current project and `.env` content hash, so changing `.env` requires approval again. In an interactive prompt you can also allow any future `.env` changes for that project explicitly.
+
 For `fish`:
 
 ```fish
@@ -244,6 +247,12 @@ Project-local overrides:
 - `pw-env` asks for approval before loading it and stores the approved file hash in the user state directory
 - If the file changes later, `pw-env` requires approval again before applying it
 
+Secret-fetch approvals:
+
+- `pw-env` blocks backend lookups until the current project and `.env` contents are approved
+- Hash-specific approvals are stored per project, so a modified `.env` cannot fetch new credentials without another approval
+- You can explicitly allow any `.env` changes for a project if you trust the whole project directory
+
 Example with per-project overrides:
 
 ```toml
@@ -301,6 +310,11 @@ Main subcommands:
 - `pw-env approvals approve <path>` stores the current hash for a `.pw-env.toml` file or project directory after validating the file
 - `pw-env approvals show [path]` shows the current and approved hash for a `.pw-env.toml` file or project directory
 - `pw-env approvals revoke <path>` removes a stored approval for a `.pw-env.toml` file or project directory
+- `pw-env approvals list-fetch` lists approved secret-fetch projects and `.env` hashes
+- `pw-env approvals approve-fetch <path>` approves secret fetching for the current `.env` hash
+- `pw-env approvals approve-fetch <path> --project-wide` allows any future `.env` changes in that project
+- `pw-env approvals show-fetch [path]` shows secret-fetch approval status for a `.env` file or project directory
+- `pw-env approvals revoke-fetch <path>` removes stored secret-fetch approvals for that project
 - `pw-env config-template` prints the default config template
 
 ## Migration Workflow

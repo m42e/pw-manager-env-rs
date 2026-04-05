@@ -14,11 +14,33 @@ pub struct ApprovedProjectConfigEntry {
     pub hash: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretFetchApprovalMode {
+    CurrentEnvHash,
+    ProjectWide,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApprovedSecretFetchEntry {
+    pub project_path: PathBuf,
+    pub env_hash: Option<String>,
+    pub project_wide: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProjectOverrideApprovalStatus {
     pub override_path: PathBuf,
     pub approved_hash: Option<String>,
     pub current_hash: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SecretFetchApprovalStatus {
+    pub project_path: PathBuf,
+    pub env_path: PathBuf,
+    pub current_env_hash: Option<String>,
+    pub approved_env_hashes: BTreeSet<String>,
+    pub project_wide: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -197,6 +219,14 @@ struct ApprovedProjectConfigs {
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
+struct ApprovedSecretFetches {
+    #[serde(default)]
+    approved_env_hashes: BTreeMap<String, BTreeSet<String>>,
+    #[serde(default)]
+    project_wide: BTreeSet<String>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct ReviewedMigrations {
     #[serde(default)]
     reviewed_entry_fingerprints: BTreeMap<String, BTreeSet<String>>,
@@ -266,8 +296,16 @@ impl Config {
         ApprovedProjectConfigs::path()
     }
 
+    pub fn secret_fetch_approval_store_path() -> Option<PathBuf> {
+        ApprovedSecretFetches::path()
+    }
+
     pub fn approved_project_configs() -> Result<Vec<ApprovedProjectConfigEntry>> {
         Ok(ApprovedProjectConfigs::load()?.entries())
+    }
+
+    pub fn approved_secret_fetches() -> Result<Vec<ApprovedSecretFetchEntry>> {
+        Ok(ApprovedSecretFetches::load()?.entries())
     }
 
     pub fn project_override_approval_status(path: &Path) -> Result<ProjectOverrideApprovalStatus> {
@@ -311,6 +349,129 @@ impl Config {
             approvals.save()?;
         }
         Ok(removed)
+    }
+
+    pub fn secret_fetch_approval_status(path: &Path) -> Result<SecretFetchApprovalStatus> {
+        let (project_path, env_path) = resolve_secret_fetch_target(path)?;
+        let approvals = ApprovedSecretFetches::load()?;
+        let current_env_hash = if env_path.exists() {
+            Some(hash_file(&env_path)?)
+        } else {
+            None
+        };
+
+        Ok(SecretFetchApprovalStatus {
+            approved_env_hashes: approvals.approved_hashes(&project_path),
+            current_env_hash,
+            env_path,
+            project_path: project_path.clone(),
+            project_wide: approvals.is_project_wide(&project_path),
+        })
+    }
+
+    pub fn approve_secret_fetch(
+        path: &Path,
+        mode: SecretFetchApprovalMode,
+    ) -> Result<ApprovedSecretFetchEntry> {
+        let (project_path, env_path) = resolve_secret_fetch_target(path)?;
+        let mut approvals = ApprovedSecretFetches::load()?;
+
+        match mode {
+            SecretFetchApprovalMode::CurrentEnvHash => {
+                let env_hash = hash_file(&env_path)?;
+                approvals.approve_hash(&project_path, env_hash.clone());
+                approvals.save()?;
+                Ok(ApprovedSecretFetchEntry {
+                    project_path,
+                    env_hash: Some(env_hash),
+                    project_wide: false,
+                })
+            }
+            SecretFetchApprovalMode::ProjectWide => {
+                approvals.allow_project_wide(&project_path);
+                approvals.save()?;
+                Ok(ApprovedSecretFetchEntry {
+                    project_path,
+                    env_hash: None,
+                    project_wide: true,
+                })
+            }
+        }
+    }
+
+    pub fn revoke_secret_fetch_approval(path: &Path) -> Result<bool> {
+        let (project_path, _) = resolve_secret_fetch_target(path)?;
+        let mut approvals = ApprovedSecretFetches::load()?;
+        let removed = approvals.revoke(&project_path);
+        if removed {
+            approvals.save()?;
+        }
+        Ok(removed)
+    }
+
+    pub fn ensure_secret_fetch_approved(env_path: &Path) -> Result<()> {
+        let (project_path, env_path) = resolve_secret_fetch_target(env_path)?;
+        let env_hash = hash_file(&env_path)?;
+        let mut approvals = ApprovedSecretFetches::load()?;
+
+        if approvals.is_approved(&project_path, &env_hash) {
+            debug!(
+                "Credential fetch already approved for project {}",
+                project_path.display()
+            );
+            return Ok(());
+        }
+
+        let previously_approved_hashes = approvals.approved_hashes(&project_path);
+        if !io::stdin().is_terminal() {
+            let state = if previously_approved_hashes.is_empty() {
+                "has not been approved yet"
+            } else {
+                "changed since its last approved .env contents"
+            };
+            anyhow::bail!(
+                "pw-env: credential fetching for project {} with {} {}. Re-run in an interactive session to approve this .env hash or allow the whole project.",
+                project_path.display(),
+                env_path.display(),
+                state,
+            );
+        }
+
+        eprintln!("Credential fetch approval required for project {}", project_path.display());
+        eprintln!(".env file: {}", env_path.display());
+        if previously_approved_hashes.is_empty() {
+            eprintln!(
+                "This .env file can trigger secret lookups from your configured password backend."
+            );
+        } else {
+            eprintln!("This .env file changed since the last approved version.");
+        }
+        eprintln!(
+            "Approve the current .env hash only, or allow any future .env changes in this project."
+        );
+        eprint!("Approve secret fetching? [y] current hash / [a]ll project changes / [N] no ");
+        io::stderr().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let answer = input.trim().to_ascii_lowercase();
+
+        match answer.as_str() {
+            "y" | "yes" => {
+                approvals.approve_hash(&project_path, env_hash);
+                approvals.save()?;
+                Ok(())
+            }
+            "a" | "all" | "always" => {
+                approvals.allow_project_wide(&project_path);
+                approvals.save()?;
+                Ok(())
+            }
+            _ => anyhow::bail!(
+                "Credential fetching was not approved for project {}",
+                project_path.display()
+            ),
+        }
     }
 
     pub fn reviewed_migration_entry_fingerprints(env_path: &Path) -> Result<BTreeSet<String>> {
@@ -545,6 +706,128 @@ impl ApprovedProjectConfigs {
     }
 }
 
+impl ApprovedSecretFetches {
+    fn load() -> Result<Self> {
+        let Some(path) = Self::path() else {
+            return Ok(Self::default());
+        };
+
+        Self::load_from_path(&path)
+    }
+
+    fn load_from_path(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+
+        let contents = std::fs::read_to_string(path).with_context(|| {
+            format!(
+                "Failed to read secret fetch approval store from {}",
+                path.display()
+            )
+        })?;
+        serde_json::from_str(&contents).with_context(|| {
+            format!(
+                "Failed to parse secret fetch approval store from {}",
+                path.display()
+            )
+        })
+    }
+
+    fn save(&self) -> Result<()> {
+        let Some(path) = Self::path() else {
+            return Ok(());
+        };
+
+        self.save_to_path(&path)
+    }
+
+    fn save_to_path(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create state directory {}", parent.display())
+            })?;
+        }
+
+        let contents = serde_json::to_string_pretty(self)
+            .context("Failed to serialize secret fetch approval store")?;
+        std::fs::write(path, contents).with_context(|| {
+            format!(
+                "Failed to write secret fetch approval store to {}",
+                path.display()
+            )
+        })
+    }
+
+    fn approve_hash(&mut self, project_path: &Path, env_hash: String) {
+        self.approved_env_hashes
+            .entry(normalize_path(project_path))
+            .or_default()
+            .insert(env_hash);
+    }
+
+    fn allow_project_wide(&mut self, project_path: &Path) {
+        self.project_wide.insert(normalize_path(project_path));
+    }
+
+    fn approved_hashes(&self, project_path: &Path) -> BTreeSet<String> {
+        self.approved_env_hashes
+            .get(&normalize_path(project_path))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn is_project_wide(&self, project_path: &Path) -> bool {
+        self.project_wide.contains(&normalize_path(project_path))
+    }
+
+    fn is_approved(&self, project_path: &Path, env_hash: &str) -> bool {
+        self.is_project_wide(project_path)
+            || self
+                .approved_env_hashes
+                .get(&normalize_path(project_path))
+                .is_some_and(|hashes| hashes.contains(env_hash))
+    }
+
+    fn revoke(&mut self, project_path: &Path) -> bool {
+        let normalized = normalize_path(project_path);
+        let removed_hashes = self.approved_env_hashes.remove(&normalized).is_some();
+        let removed_project = self.project_wide.remove(&normalized);
+        removed_hashes || removed_project
+    }
+
+    fn entries(&self) -> Vec<ApprovedSecretFetchEntry> {
+        let mut entries = Vec::new();
+
+        for project_path in &self.project_wide {
+            entries.push(ApprovedSecretFetchEntry {
+                project_path: PathBuf::from(project_path),
+                env_hash: None,
+                project_wide: true,
+            });
+        }
+
+        for (project_path, hashes) in &self.approved_env_hashes {
+            for hash in hashes {
+                entries.push(ApprovedSecretFetchEntry {
+                    project_path: PathBuf::from(project_path),
+                    env_hash: Some(hash.clone()),
+                    project_wide: false,
+                });
+            }
+        }
+
+        entries
+    }
+
+    fn path() -> Option<PathBuf> {
+        dirs::state_dir().or_else(dirs::data_local_dir).map(|dir| {
+            dir.join("pw-manager-env")
+                .join("approved-secret-fetches.json")
+        })
+    }
+}
+
 impl ReviewedMigrations {
     fn load() -> Result<Self> {
         let Some(path) = Self::path() else {
@@ -681,9 +964,42 @@ fn resolve_project_override_target(path: &Path) -> Result<PathBuf> {
         .with_context(|| format!("Failed to resolve {}", candidate.display()))
 }
 
+fn resolve_secret_fetch_target(path: &Path) -> Result<(PathBuf, PathBuf)> {
+    let env_path = if path.is_dir() {
+        path.join(".env")
+    } else {
+        path.to_path_buf()
+    };
+
+    if env_path.file_name().and_then(|name| name.to_str()) != Some(".env") {
+        anyhow::bail!(
+            "Expected a .env file or a directory containing one: {}",
+            path.display()
+        );
+    }
+
+    if !env_path.exists() {
+        anyhow::bail!(".env file not found: {}", env_path.display());
+    }
+
+    let env_path = env_path
+        .canonicalize()
+        .with_context(|| format!("Failed to resolve {}", env_path.display()))?;
+    let project_dir = env_path
+        .parent()
+        .and_then(find_git_root)
+        .or_else(|| env_path.parent().map(Path::to_path_buf))
+        .ok_or_else(|| anyhow::anyhow!("Failed to determine project for {}", env_path.display()))?;
+    let project_path = project_dir
+        .canonicalize()
+        .with_context(|| format!("Failed to resolve {}", project_dir.display()))?;
+
+    Ok((project_path, env_path))
+}
+
 fn hash_file(path: &Path) -> Result<String> {
     let contents = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read project override from {}", path.display()))?;
+        .with_context(|| format!("Failed to read file {}", path.display()))?;
     Ok(sha256_hex(&contents))
 }
 
@@ -851,6 +1167,53 @@ vault = "Work"
         let mut loaded = loaded;
         assert!(loaded.revoke(&override_path));
         assert_eq!(loaded.approved_hash(&override_path), None);
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_secret_fetch_approval_store_round_trip_and_revoke() {
+        let test_dir = unique_test_dir("secret-fetch-approval-store");
+        let project_dir = test_dir.join("project");
+        let env_path = project_dir.join(".env");
+        let store_path = test_dir.join("approved-secret-fetches.json");
+
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(&env_path, "API_KEY=op://vault/item/api_key\n").unwrap();
+
+        let env_hash = hash_file(&env_path).unwrap();
+        let mut approvals = ApprovedSecretFetches::default();
+        approvals.approve_hash(&project_dir, env_hash.clone());
+        approvals.allow_project_wide(&project_dir);
+        approvals.save_to_path(&store_path).unwrap();
+
+        let loaded = ApprovedSecretFetches::load_from_path(&store_path).unwrap();
+        assert!(loaded.is_approved(&project_dir, &env_hash));
+        assert!(loaded.is_project_wide(&project_dir));
+        assert_eq!(loaded.approved_hashes(&project_dir), BTreeSet::from([env_hash]));
+
+        let mut loaded = loaded;
+        assert!(loaded.revoke(&project_dir));
+        assert!(!loaded.is_project_wide(&project_dir));
+        assert!(loaded.approved_hashes(&project_dir).is_empty());
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_resolve_secret_fetch_target_prefers_git_root_as_project() {
+        let test_dir = unique_test_dir("resolve-secret-fetch-target");
+        let git_root = test_dir.join("repo");
+        let service_dir = git_root.join("services/api");
+        let env_path = service_dir.join(".env");
+
+        fs::create_dir_all(git_root.join(".git")).unwrap();
+        fs::create_dir_all(&service_dir).unwrap();
+        fs::write(&env_path, "API_KEY=\n").unwrap();
+
+        let (project_path, resolved_env_path) = resolve_secret_fetch_target(&service_dir).unwrap();
+        assert_eq!(project_path, git_root.canonicalize().unwrap());
+        assert_eq!(resolved_env_path, env_path.canonicalize().unwrap());
 
         let _ = fs::remove_dir_all(&test_dir);
     }

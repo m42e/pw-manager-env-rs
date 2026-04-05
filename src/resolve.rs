@@ -42,6 +42,8 @@ pub fn resolve_env_file(
         return Ok(resolved);
     }
 
+    Config::ensure_secret_fetch_approved(&env_file.path)?;
+
     let project = detect_project_name(dir);
     debug!("Detected project name: {:?}", project);
 

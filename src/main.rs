@@ -54,7 +54,7 @@ enum Commands {
     },
     /// Check availability of password manager backends
     Check,
-    /// Manage approved project-local override hashes
+    /// Manage approval state for project-local overrides and secret fetching
     Approvals {
         #[command(subcommand)]
         command: ApprovalCommands,
@@ -80,6 +80,26 @@ enum ApprovalCommands {
     /// Remove the approved hash for a project override file or directory
     Revoke {
         /// Path to a .pw-env.toml file or a directory containing one
+        path: PathBuf,
+    },
+    /// List approved secret-fetch projects and .env hashes
+    ListFetch,
+    /// Approve credential fetching for a .env file or project directory
+    ApproveFetch {
+        /// Path to a .env file or a directory containing one
+        path: PathBuf,
+        /// Allow any future .env changes in this project without prompting again
+        #[arg(long)]
+        project_wide: bool,
+    },
+    /// Show secret-fetch approval status for a .env file or project directory
+    ShowFetch {
+        /// Path to a .env file or a directory containing one
+        path: Option<PathBuf>,
+    },
+    /// Revoke secret-fetch approvals for a .env file or project directory's project
+    RevokeFetch {
+        /// Path to a .env file or a directory containing one
         path: PathBuf,
     },
 }
@@ -447,6 +467,103 @@ fn handle_approvals(command: ApprovalCommands) -> Result<()> {
             }
             Ok(())
         }
+        ApprovalCommands::ListFetch => {
+            if let Some(store_path) = config::Config::secret_fetch_approval_store_path() {
+                eprintln!("Secret fetch approval store: {}", store_path.display());
+            }
+
+            let approvals = config::Config::approved_secret_fetches()?;
+            if approvals.is_empty() {
+                eprintln!("No approved secret-fetch entries.");
+                return Ok(());
+            }
+
+            eprintln!("Approved secret-fetch entries:");
+            for approval in approvals {
+                if approval.project_wide {
+                    eprintln!("  project-wide  {}", approval.project_path.display());
+                } else if let Some(hash) = approval.env_hash {
+                    eprintln!("  {}  {}", hash, approval.project_path.display());
+                }
+            }
+            Ok(())
+        }
+        ApprovalCommands::ApproveFetch { path, project_wide } => {
+            let mode = if project_wide {
+                config::SecretFetchApprovalMode::ProjectWide
+            } else {
+                config::SecretFetchApprovalMode::CurrentEnvHash
+            };
+            let approval = config::Config::approve_secret_fetch(&path, mode)?;
+            if approval.project_wide {
+                eprintln!(
+                    "Approved secret fetching for any .env changes in project {}",
+                    approval.project_path.display()
+                );
+            } else {
+                eprintln!(
+                    "Approved secret fetching for project {}",
+                    approval.project_path.display()
+                );
+                if let Some(hash) = approval.env_hash {
+                    eprintln!("Stored .env hash: {hash}");
+                }
+            }
+            Ok(())
+        }
+        ApprovalCommands::ShowFetch { path } => {
+            let target = match path {
+                Some(path) => path,
+                None => resolve_dir(None)?,
+            };
+            let status = config::Config::secret_fetch_approval_status(&target)?;
+
+            eprintln!("Project: {}", status.project_path.display());
+            eprintln!(".env file: {}", status.env_path.display());
+            match status.current_env_hash.as_deref() {
+                Some(hash) => eprintln!("Current .env hash: {hash}"),
+                None => eprintln!("Current .env hash: unavailable"),
+            }
+            eprintln!("Project-wide approval: {}", status.project_wide);
+            if status.approved_env_hashes.is_empty() {
+                eprintln!("Approved .env hashes: none");
+            } else {
+                eprintln!(
+                    "Approved .env hashes: {}",
+                    status
+                        .approved_env_hashes
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+
+            let state = if status.project_wide {
+                "approved for any .env change"
+            } else if status
+                .current_env_hash
+                .as_ref()
+                .is_some_and(|hash| status.approved_env_hashes.contains(hash))
+            {
+                "approved for current .env hash"
+            } else if status.approved_env_hashes.is_empty() {
+                "not approved"
+            } else {
+                "changed since approved .env hashes"
+            };
+            eprintln!("Status: {state}");
+            Ok(())
+        }
+        ApprovalCommands::RevokeFetch { path } => {
+            let revoked = config::Config::revoke_secret_fetch_approval(&path)?;
+            if revoked {
+                eprintln!("Revoked secret-fetch approvals for {}", path.display());
+            } else {
+                eprintln!("No secret-fetch approval entry found for {}", path.display());
+            }
+            Ok(())
+        }
     }
 }
 
@@ -515,6 +632,9 @@ check_interval_hours = 24
 # Place this in a project directory as .pw-env.toml.
 # pw-env will ask you to approve it the first time it sees the file,
 # and again whenever its contents change.
+# Secret fetching from .env files is approved separately and is also
+# re-approved whenever the .env contents change unless you allow the
+# whole project.
 #
 # backend = "op"
 # item = "api-server-env"
