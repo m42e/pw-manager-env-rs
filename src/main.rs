@@ -78,7 +78,7 @@ fn main() {
     }
 }
 
-fn run(cli: Cli, config: config::Config) -> Result<()> {
+fn run(cli: Cli, _config: config::Config) -> Result<()> {
     match cli.command {
         Commands::Init { shell } => {
             print!("{}", shell::generate_hook(&shell));
@@ -87,6 +87,7 @@ fn run(cli: Cli, config: config::Config) -> Result<()> {
 
         Commands::Export { dir, shell } => {
             let dir = resolve_dir(dir)?;
+            let config = config::Config::load_for_dir(&dir)?;
             let shell_syntax = match shell.as_str() {
                 "fish" => output::ShellSyntax::Fish,
                 _ => output::ShellSyntax::Posix,
@@ -139,6 +140,7 @@ fn run(cli: Cli, config: config::Config) -> Result<()> {
 
         Commands::Load { dir } => {
             let dir = resolve_dir(dir)?;
+            let config = config::Config::load_for_dir(&dir)?;
             let env_path = env_file::EnvFile::find(&dir)
                 .ok_or_else(|| anyhow::anyhow!("No .env file found in {}", dir.display()))?;
             let env_file = env_file::EnvFile::parse(&env_path)?;
@@ -174,13 +176,16 @@ fn run(cli: Cli, config: config::Config) -> Result<()> {
 
         Commands::Migrate { dir } => {
             let dir = resolve_dir(dir)?;
+            let config = config::Config::load_for_dir(&dir)?;
             migrate::migrate(&dir, &config)
         }
 
         Commands::Check => {
+            let dir = resolve_dir(None)?;
+            let config = config::Config::load_for_dir(&dir)?;
             check_backends();
             eprintln!();
-            check_config(&config);
+            check_config(&config, &dir);
             Ok(())
         }
 
@@ -198,7 +203,11 @@ fn resolve_dir(dir: Option<PathBuf>) -> Result<PathBuf> {
                 .with_context(|| format!("Directory not found: {}", d.display()))?;
             Ok(canonical)
         }
-        None => std::env::current_dir().context("Failed to determine current directory"),
+        None => {
+            let dir = std::env::current_dir().context("Failed to determine current directory")?;
+            dir.canonicalize()
+                .with_context(|| format!("Directory not found: {}", dir.display()))
+        }
     }
 }
 
@@ -253,7 +262,7 @@ fn check_backends() {
     }
 }
 
-fn check_config(config: &config::Config) {
+fn check_config(config: &config::Config, dir: &std::path::Path) {
     let config_path = config::Config::config_path();
     if config_path.exists() {
         eprintln!("Configuration: {}", config_path.display());
@@ -266,6 +275,12 @@ fn check_config(config: &config::Config) {
         }
         eprintln!("  GPG file pattern: {}", config.defaults.gpg.file_pattern);
         eprintln!("  Projects configured: {}", config.projects.len());
+        if let Some(local_override) = config::Config::project_override_path(dir) {
+            eprintln!(
+                "  Project override file: {}",
+                local_override.display()
+            );
+        }
     } else {
         eprintln!("Configuration: not found (using defaults)");
         eprintln!("  Create one with: pw-env config-template > {}", config_path.display());
@@ -326,6 +341,17 @@ level = "info"
 # [projects.gpg]
 # file_pattern = ".secrets.gpg"
 # recipient = "personal@example.com"
+
+# Project-local override file
+# Place this in a project directory as .pw-env.toml.
+# pw-env will ask you to approve it the first time it sees the file,
+# and again whenever its contents change.
+#
+# backend = "op"
+# item = "api-server-env"
+#
+# [op]
+# vault = "Work"
 "#
     .to_string()
 }

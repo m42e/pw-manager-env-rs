@@ -27,6 +27,16 @@ impl OpBackend {
         Ok(stdout.trim().to_string())
     }
 
+    fn get_item_field(item: &str, field: &str, vault: Option<&str>, account: Option<&str>) -> Result<String> {
+        let mut args = vec!["item", "get", item, "--fields", field, "--reveal"];
+        let vault_arg;
+        if let Some(v) = vault {
+            vault_arg = format!("--vault={v}");
+            args.push(&vault_arg);
+        }
+        Self::run_op(&args, account)
+    }
+
     /// Resolve a key when multiple items share the same name, by checking
     /// the "project" custom field on each candidate item.
     fn resolve_by_project(
@@ -61,7 +71,7 @@ impl OpBackend {
                 .get("id")
                 .and_then(|i| i.as_str())
                 .ok_or_else(|| anyhow::anyhow!("1Password item missing id"))?;
-            return Self::run_op(&["item", "get", id, "--fields", "label=password"], account);
+            return Self::get_item_field(id, "label=password", vault, account);
         }
 
         // Multiple matches — check each item's "project" field
@@ -84,10 +94,7 @@ impl OpBackend {
                     if label == Some("project") || label == Some("Project") {
                         if field.get("value").and_then(|v| v.as_str()) == Some(project) {
                             debug!("Matched item '{id}' by project field '{project}'");
-                            return Self::run_op(
-                                &["item", "get", id, "--fields", "label=password"],
-                                account,
-                            );
+                            return Self::get_item_field(id, "label=password", vault, account);
                         }
                     }
                 }
@@ -117,21 +124,11 @@ impl Backend for OpBackend {
         if let Some(item) = ctx.config.effective_item(ctx.dir) {
             debug!("Resolving key '{key}' as field on item '{item}'");
             let label_arg = format!("label={key}");
-            let mut args = vec!["item", "get", item, "--fields", label_arg.as_str()];
-            let vault_arg;
-            if let Some(ref vault) = op_config.vault {
-                vault_arg = format!("--vault={vault}");
-                args.push(&vault_arg);
-            }
-            Self::run_op(&args, account)
+            Self::get_item_field(item, label_arg.as_str(), op_config.vault.as_deref(), account)
         } else if let Some(ref vault) = op_config.vault {
             // Search for an item named after the key in the configured vault
             debug!("Resolving key '{key}' as item in vault '{vault}'");
-            let vault_arg = format!("--vault={vault}");
-            let result = Self::run_op(
-                &["item", "get", key, "--fields", "label=password", &vault_arg],
-                account,
-            );
+            let result = Self::get_item_field(key, "label=password", Some(vault), account);
             match result {
                 Ok(value) => Ok(value),
                 Err(e) if format!("{e}").to_lowercase().contains("more than 1 item") => {
@@ -146,7 +143,7 @@ impl Backend for OpBackend {
             }
         } else {
             debug!("Resolving key '{key}' as item (no vault configured)");
-            let result = Self::run_op(&["item", "get", key, "--fields", "label=password"], account);
+            let result = Self::get_item_field(key, "label=password", None, account);
             match result {
                 Ok(value) => Ok(value),
                 Err(e) if format!("{e}").to_lowercase().contains("more than 1 item") => {

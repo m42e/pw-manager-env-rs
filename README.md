@@ -13,6 +13,7 @@ The tool is designed for local development workflows where projects keep a check
 - Warns when plaintext secrets are still present in `.env`
 - Migrates plaintext values out of `.env` into the configured backend
 - Supports per-project backend overrides via config
+- Supports trusted project-local overrides via `.pw-env.toml`
 
 ## Install
 
@@ -209,6 +210,12 @@ Top-level sections:
 - `[log]` configures log level and optional log file path
 - `[[projects]]` defines per-path overrides
 
+Project-local overrides:
+
+- Put a `.pw-env.toml` file in the project directory or Git root
+- `pw-env` asks for approval before loading it and stores the approved file hash in the user state directory
+- If the file changes later, `pw-env` requires approval again before applying it
+
 Example with per-project overrides:
 
 ```toml
@@ -234,6 +241,18 @@ backend = "gpg"
 file_pattern = ".secrets.gpg"
 recipient = "you@example.com"
 ```
+
+Example project-local override file:
+
+```toml
+backend = "op"
+item = "company-api-env"
+
+[op]
+vault = "Work"
+```
+
+The local file is applied as the most specific override for that project directory after you approve its current contents.
 
 ## Command Reference
 
