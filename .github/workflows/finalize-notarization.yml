@@ -23,6 +23,7 @@ jobs:
     runs-on: macos-14
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -78,7 +79,7 @@ jobs:
             : > "$completed_jsonl"
             : > "$failed_jsonl"
 
-            gh release view "$tag" --json body --jq '.body // ""' > "$body_file"
+            gh release view "$tag" -R "$GH_REPO" --json body --jq '.body // ""' > "$body_file"
 
             if ! grep -q "$marker_begin" "$body_file"; then
               echo "Release $tag has no pending notarization block."
@@ -124,7 +125,7 @@ jobs:
               case "$status" in
                 Accepted)
                   mkdir -p "$package_dir"
-                  if ! gh release download "$tag" --pattern "$asset_name" --dir "$asset_dir"; then
+                  if ! gh release download "$tag" -R "$GH_REPO" --pattern "$asset_name" --dir "$asset_dir"; then
                     jq -nc \
                       --argjson base "$item" \
                       --arg status "Missing release asset" \
@@ -172,7 +173,7 @@ jobs:
                       ;;
                   esac
 
-                  gh release upload "$tag" "$asset_path" --clobber
+                  gh release upload "$tag" -R "$GH_REPO" "$asset_path" --clobber
                   jq -nc \
                     --argjson base "$item" \
                     --arg status "$status" \
@@ -269,6 +270,6 @@ jobs:
               cat "$suffix_file" >> "$updated_body_file"
             fi
 
-            gh release edit "$tag" --notes-file "$updated_body_file"
+            gh release edit "$tag" -R "$GH_REPO" --notes-file "$updated_body_file"
             rm -rf "$workdir"
           done
