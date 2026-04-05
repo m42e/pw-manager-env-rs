@@ -1,0 +1,274 @@
+name: Finalize macOS Notarization
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Optional tag to poll (for example v1.2.3)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: finalize-notarization
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    name: Poll Apple notarization
+    runs-on: macos-14
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      SELECTED_TAG: ${{ inputs.tag || '' }}
+      MACOS_NOTARIZATION_SECRETS_PRESENT: ${{ secrets.APPLE_ID != '' && secrets.APPLE_APP_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+    steps:
+      - name: Skip when notarization secrets are unavailable
+        if: env.MACOS_NOTARIZATION_SECRETS_PRESENT != 'true'
+        run: echo "Apple notarization secrets not configured; skipping notarization finalization."
+
+      - name: Poll pending macOS notarization submissions
+        if: env.MACOS_NOTARIZATION_SECRETS_PRESENT == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          marker_begin='<!-- macos-notarization:begin -->'
+          marker_end='<!-- macos-notarization:end -->'
+
+          release_tags=()
+          if [ -n "$SELECTED_TAG" ]; then
+            release_tags+=("$SELECTED_TAG")
+          else
+            while IFS= read -r tag; do
+              [ -n "$tag" ] && release_tags+=("$tag")
+            done < <(
+              gh api "repos/${{ github.repository }}/releases" --paginate \
+                --jq '.[] | select(.body != null and (.body | contains("<!-- macos-notarization:begin -->"))) | .tag_name'
+            )
+          fi
+
+          if [ "${#release_tags[@]}" -eq 0 ]; then
+            echo "No releases with pending macOS notarization metadata."
+            exit 0
+          fi
+
+          for tag in "${release_tags[@]}"; do
+            echo "Processing $tag"
+
+            workdir=$(mktemp -d)
+            body_file="$workdir/body.md"
+            prefix_file="$workdir/prefix.md"
+            suffix_file="$workdir/suffix.md"
+            state_file="$workdir/state.json"
+            pending_jsonl="$workdir/pending.jsonl"
+            completed_jsonl="$workdir/completed.jsonl"
+            failed_jsonl="$workdir/failed.jsonl"
+            updated_state_file="$workdir/updated-state.json"
+            replacement_file="$workdir/replacement.md"
+            updated_body_file="$workdir/updated-body.md"
+
+            : > "$pending_jsonl"
+            : > "$completed_jsonl"
+            : > "$failed_jsonl"
+
+            gh release view "$tag" --json body --jq '.body // ""' > "$body_file"
+
+            if ! grep -q "$marker_begin" "$body_file"; then
+              echo "Release $tag has no pending notarization block."
+              rm -rf "$workdir"
+              continue
+            fi
+
+            awk -v begin="$marker_begin" -v end="$marker_end" '
+              index($0, begin) { inside = 1; next }
+              index($0, end) { inside = 0; next }
+              inside { print }
+            ' "$body_file" | sed '/^```json$/d;/^```$/d' > "$state_file"
+
+            if ! jq empty "$state_file" >/dev/null 2>&1; then
+              echo "::warning::Release $tag contains invalid notarization metadata; skipping."
+              rm -rf "$workdir"
+              continue
+            fi
+
+            while IFS= read -r item; do
+              [ -n "$item" ] || continue
+
+              target=$(jq -r '.target' <<<"$item")
+              binary=$(jq -r '.binary' <<<"$item")
+              archive=$(jq -r '.archive' <<<"$item")
+              asset_name=$(jq -r '.asset_name' <<<"$item")
+              submission_id=$(jq -r '.submission_id' <<<"$item")
+              checked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+              response_file="$workdir/${target}-notary-info.json"
+              asset_dir="$workdir/${target}"
+              package_dir="$asset_dir/package"
+              asset_path="$asset_dir/$asset_name"
+              binary_path="$package_dir/$binary"
+
+              xcrun notarytool info "$submission_id" \
+                --apple-id "$APPLE_ID" \
+                --password "$APPLE_APP_PASSWORD" \
+                --team-id "$APPLE_TEAM_ID" \
+                --output-format json > "$response_file"
+
+              status=$(jq -r '.status // "Unknown"' "$response_file")
+
+              case "$status" in
+                Accepted)
+                  mkdir -p "$package_dir"
+                  if ! gh release download "$tag" --pattern "$asset_name" --dir "$asset_dir"; then
+                    jq -nc \
+                      --argjson base "$item" \
+                      --arg status "Missing release asset" \
+                      --arg checked_at "$checked_at" \
+                      '$base + {status: $status, last_checked_at: $checked_at}' >> "$failed_jsonl"
+                    continue
+                  fi
+
+                  case "$archive" in
+                    tar.gz)
+                      tar -xzf "$asset_path" -C "$package_dir"
+                      ;;
+                    zip)
+                      ditto -x -k "$asset_path" "$package_dir"
+                      ;;
+                    *)
+                      jq -nc \
+                        --argjson base "$item" \
+                        --arg status "Unsupported archive: $archive" \
+                        --arg checked_at "$checked_at" \
+                        '$base + {status: $status, last_checked_at: $checked_at}' >> "$failed_jsonl"
+                      continue
+                      ;;
+                  esac
+
+                  if [ ! -f "$binary_path" ]; then
+                    jq -nc \
+                      --argjson base "$item" \
+                      --arg status "Packaged binary missing" \
+                      --arg checked_at "$checked_at" \
+                      '$base + {status: $status, last_checked_at: $checked_at}' >> "$failed_jsonl"
+                    continue
+                  fi
+
+                  xcrun stapler staple "$binary_path"
+                  xcrun stapler validate "$binary_path"
+
+                  case "$archive" in
+                    tar.gz)
+                      tar -czf "$asset_path" -C "$package_dir" "$binary"
+                      ;;
+                    zip)
+                      rm -f "$asset_path"
+                      ditto -c -k --keepParent "$binary_path" "$asset_path"
+                      ;;
+                  esac
+
+                  gh release upload "$tag" "$asset_path" --clobber
+                  jq -nc \
+                    --argjson base "$item" \
+                    --arg status "$status" \
+                    --arg completed_at "$checked_at" \
+                    '$base + {status: $status, completed_at: $completed_at}' >> "$completed_jsonl"
+                  ;;
+                "In Progress")
+                  jq -nc \
+                    --argjson base "$item" \
+                    --arg status "$status" \
+                    --arg checked_at "$checked_at" \
+                    '$base + {status: $status, last_checked_at: $checked_at}' >> "$pending_jsonl"
+                  ;;
+                *)
+                  jq -nc \
+                    --argjson base "$item" \
+                    --arg status "$status" \
+                    --arg checked_at "$checked_at" \
+                    '$base + {status: $status, last_checked_at: $checked_at}' >> "$failed_jsonl"
+                  ;;
+              esac
+            done < <(jq -c '.pending[]?' "$state_file")
+
+            jq -s '.' "$pending_jsonl" > "$workdir/pending.json"
+            jq -s '.' "$completed_jsonl" > "$workdir/completed.json"
+            jq -s '.' "$failed_jsonl" > "$workdir/failed.json"
+
+            pending_count=$(jq 'length' "$workdir/pending.json")
+            failed_count=$(jq 'length' "$workdir/failed.json")
+            checked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+            awk -v marker="$marker_begin" 'index($0, marker) { exit } { print }' "$body_file" > "$prefix_file"
+            awk -v marker="$marker_end" 'found { print } index($0, marker) { found = 1; next }' "$body_file" > "$suffix_file"
+
+            if [ "$pending_count" -eq 0 ]; then
+              if [ "$failed_count" -eq 0 ]; then
+                printf '%s\n' \
+                  "macOS notarization completed on $checked_at and the macOS release assets were updated in place." \
+                  > "$replacement_file"
+              else
+                jq -n \
+                  --arg tag "$tag" \
+                  --arg checked_at "$checked_at" \
+                  --slurpfile completed "$workdir/completed.json" \
+                  --slurpfile failed "$workdir/failed.json" \
+                  '{
+                    tag: $tag,
+                    last_checked_at: $checked_at,
+                    completed: $completed[0],
+                    failed: $failed[0]
+                  }' > "$updated_state_file"
+
+                {
+                  printf '%s\n\n' \
+                    "macOS notarization finished with failures for one or more assets. Review the state below before replacing those binaries manually."
+                  printf '```json\n'
+                  cat "$updated_state_file"
+                  printf '\n```\n'
+                } > "$replacement_file"
+              fi
+            else
+              jq -n \
+                --arg tag "$tag" \
+                --arg checked_at "$checked_at" \
+                --slurpfile pending "$workdir/pending.json" \
+                --slurpfile completed "$workdir/completed.json" \
+                --slurpfile failed "$workdir/failed.json" \
+                '{
+                  tag: $tag,
+                  last_checked_at: $checked_at,
+                  pending: $pending[0],
+                  completed: $completed[0],
+                  failed: $failed[0]
+                }' > "$updated_state_file"
+
+              {
+                printf '%s\n\n' \
+                  "macOS signed assets are pending Apple notarization. The finalize-notarization workflow polls hourly and replaces the macOS release assets in place after approval."
+                printf '%s\n' '<!-- macos-notarization:begin -->'
+                printf '```json\n'
+                cat "$updated_state_file"
+                printf '\n```\n'
+                printf '%s\n' '<!-- macos-notarization:end -->'
+              } > "$replacement_file"
+            fi
+
+            cat "$prefix_file" > "$updated_body_file"
+            if [ -s "$prefix_file" ]; then
+              printf '\n' >> "$updated_body_file"
+            fi
+            cat "$replacement_file" >> "$updated_body_file"
+            if [ -s "$suffix_file" ]; then
+              printf '\n' >> "$updated_body_file"
+              cat "$suffix_file" >> "$updated_body_file"
+            fi
+
+            gh release edit "$tag" --notes-file "$updated_body_file"
+            rm -rf "$workdir"
+          done

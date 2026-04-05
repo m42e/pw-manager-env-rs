@@ -121,7 +121,7 @@ jobs:
             "$binary_path"
           codesign --verify --verbose=2 "$binary_path"
 
-      - name: Notarize macOS binary
+      - name: Submit macOS binary for notarization
         if: runner.os == 'macOS'
         shell: bash
         env:
@@ -130,24 +130,58 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           if [ "$MACOS_SIGNING_SECRETS_PRESENT" != "true" ]; then
-            echo "Apple signing secrets not configured; skipping notarization."
+            echo "Apple signing secrets not configured; skipping notarization submission."
             exit 0
           fi
 
           if [ "$MACOS_NOTARIZATION_SECRETS_PRESENT" != "true" ]; then
-            echo "Apple notarization secrets not configured; skipping notarization."
+            echo "Apple notarization secrets not configured; skipping notarization submission."
             exit 0
           fi
 
           binary_path="target/${{ matrix.target }}/release/${{ matrix.binary }}"
           submission_path="$RUNNER_TEMP/pw-env-${RELEASE_TAG}-${{ matrix.target }}-notarize.zip"
+          response_path="$RUNNER_TEMP/notarytool-${{ matrix.target }}.json"
+          metadata_path="notarization-${{ matrix.target }}.json"
 
           ditto -c -k --keepParent "$binary_path" "$submission_path"
           xcrun notarytool submit "$submission_path" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_APP_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
-            --wait
+            --output-format json > "$response_path"
+
+          submission_id=$(jq -r '.id // empty' "$response_path")
+          if [ -z "$submission_id" ]; then
+            echo "::error::Apple notarization submission did not return a submission id"
+            cat "$response_path"
+            exit 1
+          fi
+
+          jq -n \
+            --arg tag "$RELEASE_TAG" \
+            --arg target "${{ matrix.target }}" \
+            --arg binary "${{ matrix.binary }}" \
+            --arg archive "${{ matrix.archive }}" \
+            --arg asset_name "pw-env-${RELEASE_TAG}-${{ matrix.target }}.${{ matrix.archive }}" \
+            --arg submission_id "$submission_id" \
+            --arg submitted_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{
+              tag: $tag,
+              target: $target,
+              binary: $binary,
+              archive: $archive,
+              asset_name: $asset_name,
+              submission_id: $submission_id,
+              submitted_at: $submitted_at
+            }' > "$metadata_path"
+
+      - name: Upload notarization metadata
+        if: runner.os == 'macOS' && env.MACOS_SIGNING_SECRETS_PRESENT == 'true' && env.MACOS_NOTARIZATION_SECRETS_PRESENT == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: notarization-${{ matrix.target }}
+          path: notarization-${{ matrix.target }}.json
 
       - name: Package (unix)
         if: matrix.archive == 'tar.gz'
@@ -191,12 +225,57 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Download notarization metadata
+        if: env.MACOS_SIGNING_SECRETS_PRESENT == 'true' && env.MACOS_NOTARIZATION_SECRETS_PRESENT == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          path: notarization
+          pattern: notarization-*
+          merge-multiple: true
+
       - name: Install git-cliff
         uses: kenji-miyake/setup-git-cliff@v2
 
       - name: Generate release notes
         run: |
           git-cliff --config .github/cliff.toml --latest --strip header -o RELEASE_NOTES.md
+
+      - name: Append notarization status to release notes
+        if: env.MACOS_SIGNING_SECRETS_PRESENT == 'true' && env.MACOS_NOTARIZATION_SECRETS_PRESENT == 'true'
+        shell: bash
+        run: |
+          if ! compgen -G "notarization/*.json" > /dev/null; then
+            echo "No notarization metadata found; skipping release note update."
+            exit 0
+          fi
+
+          jq -s \
+            --arg tag "$RELEASE_TAG" \
+            --arg checked_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{
+              tag: $tag,
+              last_checked_at: $checked_at,
+              pending: [
+                .[] | {
+                  target,
+                  binary,
+                  archive,
+                  asset_name,
+                  submission_id,
+                  submitted_at
+                }
+              ]
+            }' notarization/*.json > notarization-state.json
+
+          {
+            printf '\n%s\n\n' \
+              'macOS signed assets are pending Apple notarization. The finalize-notarization workflow polls hourly and replaces the macOS release assets in place after approval.'
+            printf '%s\n' '<!-- macos-notarization:begin -->'
+            printf '```json\n'
+            cat notarization-state.json
+            printf '\n```\n'
+            printf '%s\n' '<!-- macos-notarization:end -->'
+          } >> RELEASE_NOTES.md
 
       - name: Create GitHub release
         env:

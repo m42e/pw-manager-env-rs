@@ -30,7 +30,9 @@ The workflow behaves like this:
 
 - If the signing secrets are missing, macOS artifacts are built and published unsigned.
 - If the signing secrets are present, the `pw-env` binary is signed before packaging.
-- If the notarization secrets are also present, the signed binary is submitted to Apple notarization before packaging.
+- If the notarization secrets are also present, the signed binary is submitted to Apple notarization without waiting for Apple to finish processing.
+- The release is published immediately after submission, and `.github/workflows/finalize-notarization.yml` polls Apple hourly.
+- Once Apple accepts the submission, the polling workflow staples the macOS binaries and replaces the existing macOS release assets in place.
 
 ### Required GitHub Secrets
 
