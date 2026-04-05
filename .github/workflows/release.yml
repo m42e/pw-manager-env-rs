@@ -177,11 +177,12 @@ jobs:
             }' > "$metadata_path"
 
       - name: Upload notarization metadata
-        if: runner.os == 'macOS' && env.MACOS_SIGNING_SECRETS_PRESENT == 'true' && env.MACOS_NOTARIZATION_SECRETS_PRESENT == 'true'
+        if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
-          name: notarization-${{ matrix.target }}
+          name: notarization-${{ env.RELEASE_TAG }}-${{ matrix.target }}
           path: notarization-${{ matrix.target }}.json
+          if-no-files-found: ignore
 
       - name: Package (unix)
         if: matrix.archive == 'tar.gz'
@@ -225,57 +226,12 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Download notarization metadata
-        if: env.MACOS_SIGNING_SECRETS_PRESENT == 'true' && env.MACOS_NOTARIZATION_SECRETS_PRESENT == 'true'
-        uses: actions/download-artifact@v4
-        with:
-          path: notarization
-          pattern: notarization-*
-          merge-multiple: true
-
       - name: Install git-cliff
         uses: kenji-miyake/setup-git-cliff@v2
 
       - name: Generate release notes
         run: |
           git-cliff --config .github/cliff.toml --latest --strip header -o RELEASE_NOTES.md
-
-      - name: Append notarization status to release notes
-        if: env.MACOS_SIGNING_SECRETS_PRESENT == 'true' && env.MACOS_NOTARIZATION_SECRETS_PRESENT == 'true'
-        shell: bash
-        run: |
-          if ! compgen -G "notarization/*.json" > /dev/null; then
-            echo "No notarization metadata found; skipping release note update."
-            exit 0
-          fi
-
-          jq -s \
-            --arg tag "$RELEASE_TAG" \
-            --arg checked_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{
-              tag: $tag,
-              last_checked_at: $checked_at,
-              pending: [
-                .[] | {
-                  target,
-                  binary,
-                  archive,
-                  asset_name,
-                  submission_id,
-                  submitted_at
-                }
-              ]
-            }' notarization/*.json > notarization-state.json
-
-          {
-            printf '\n%s\n\n' \
-              'macOS signed assets are pending Apple notarization. The finalize-notarization workflow polls hourly and replaces the macOS release assets in place after approval.'
-            printf '%s\n' '<!-- macos-notarization:begin -->'
-            printf '```json\n'
-            cat notarization-state.json
-            printf '\n```\n'
-            printf '%s\n' '<!-- macos-notarization:end -->'
-          } >> RELEASE_NOTES.md
 
       - name: Create GitHub release
         env:
