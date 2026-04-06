@@ -100,6 +100,35 @@ For local development, you can also run it directly with Cargo:
 cargo run -- --help
 ```
 
+## Mutation Testing
+
+Install cargo-mutants:
+
+```bash
+cargo install --locked cargo-mutants
+```
+
+This repository includes `.cargo/mutants.toml` and a dedicated `mutants` Cargo profile to speed up runs:
+
+- uses a `mutants` profile without debug symbols
+- skips doctests by passing `--all-targets`
+- respects `.gitignore` while copying the tree (important in this repo because of large ignored directories)
+
+Run mutation tests with:
+
+```bash
+cargo mutants
+```
+
+On macOS, you can experiment with a RAM-backed temp directory for additional speedups:
+
+```bash
+mkdir -p /tmp/pw-env-mutants
+TMPDIR=/tmp/pw-env-mutants cargo mutants -j2
+```
+
+Tune `-j` conservatively. Start with `-j2` and increase only if your machine has enough CPU, RAM, and disk bandwidth.
+
 ## Quick Start
 
 ### 1. Create a `.env` file

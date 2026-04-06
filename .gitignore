@@ -4,5 +4,6 @@
 /docs/.vitepress/cache
 /docs/public/install.sh
 TODO.md
+/mutants.out*
 
 mutants.out/

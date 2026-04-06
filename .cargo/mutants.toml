@@ -1,0 +1,5 @@
+# Keep mutation runs fast for local development by using a lean profile,
+# skipping doctests, and avoiding copying ignored directories.
+profile = "mutants"
+gitignore = true
+additional_cargo_test_args = ["--all-targets"]
