@@ -90,8 +90,14 @@ enum Commands {
     /// Print the default configuration file template
     ConfigTemplate,
     /// Generate shell completion script
+    ///
+    /// Add one of the following lines to your shell's startup file:
+    ///
+    ///   Bash (~/.bashrc):   eval "$(pw-env completions bash)"
+    ///   Zsh  (~/.zshrc):    eval "$(pw-env completions zsh)"
+    ///   Fish (~/.config/fish/config.fish):  pw-env completions fish | source
     Completions {
-        /// Shell to generate completions for
+        /// Shell to generate completions for (bash, zsh, fish, powershell, elvish)
         shell: Shell,
     },
     #[command(hide = true)]
