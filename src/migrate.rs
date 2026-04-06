@@ -154,17 +154,22 @@ fn is_interactive() -> bool {
 
 fn mask_value(value: &str) -> String {
     let v = strip_quotes(value);
-    if v.len() <= 3 {
+    let char_count = v.chars().count();
+    if char_count <= 3 {
         "***".to_string()
     } else {
-        format!("{}***", &v[..3])
+        let prefix: String = v.chars().take(3).collect();
+        format!("{prefix}***")
     }
 }
 
 fn strip_quotes(value: &str) -> String {
     let v = value.trim();
     if (v.starts_with('"') && v.ends_with('"')) || (v.starts_with('\'') && v.ends_with('\'')) {
-        v[1..v.len() - 1].to_string()
+        let mut chars = v.chars();
+        chars.next(); // skip opening quote
+        chars.next_back(); // skip closing quote
+        chars.collect()
     } else {
         v.to_string()
     }
@@ -377,5 +382,25 @@ mod tests {
     #[test]
     fn test_strip_quotes_single_char_between_quotes() {
         assert_eq!(strip_quotes("\"a\""), "a");
+    }
+
+    #[test]
+    fn mask_value_handles_multibyte_utf8() {
+        // Emoji are 4 bytes each — this must not panic on byte slicing
+        assert_eq!(mask_value("😀😁😂😃"), "😀😁😂***");
+    }
+
+    #[test]
+    fn strip_quotes_handles_multibyte_utf8() {
+        assert_eq!(strip_quotes("\"héllo\""), "héllo");
+        assert_eq!(strip_quotes("'日本語'"), "日本語");
+    }
+
+    #[test]
+    fn mask_value_multibyte_short_returns_stars() {
+        // A single emoji (4 bytes but 1 char) is ≤3 chars
+        assert_eq!(mask_value("😀"), "***");
+        // Three emoji (12 bytes but 3 chars) is ≤3 chars
+        assert_eq!(mask_value("😀😁😂"), "***");
     }
 }

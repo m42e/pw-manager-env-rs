@@ -72,7 +72,10 @@ impl GpgBackend {
                 let value = if (value.starts_with('"') && value.ends_with('"'))
                     || (value.starts_with('\'') && value.ends_with('\''))
                 {
-                    &value[1..value.len() - 1]
+                    let mut chars = value.chars();
+                    chars.next();
+                    chars.next_back();
+                    chars.as_str()
                 } else {
                     value
                 };
@@ -95,9 +98,34 @@ impl GpgBackend {
     }
 
     /// Find the GPG file path for the given directory and config.
+    /// Validates that file_pattern does not escape the project directory.
     fn gpg_file_path(ctx_dir: &std::path::Path, config: &crate::config::Config) -> PathBuf {
         let gpg_config = config.effective_gpg(ctx_dir);
-        ctx_dir.join(&gpg_config.file_pattern)
+        let joined = ctx_dir.join(&gpg_config.file_pattern);
+        // Normalize the path and verify it stays within the project directory.
+        // If canonicalize fails (file doesn't exist yet), fall through to the
+        // component-based check.
+        if let Ok(canonical) = joined.canonicalize() {
+            if let Ok(canonical_dir) = ctx_dir.canonicalize() {
+                if !canonical.starts_with(&canonical_dir) {
+                    tracing::warn!(
+                        "GPG file_pattern '{}' escapes the project directory; falling back to default",
+                        gpg_config.file_pattern
+                    );
+                    return ctx_dir.join(".env.gpg");
+                }
+            }
+        } else {
+            // File doesn't exist yet — check for path traversal components
+            if gpg_config.file_pattern.contains("..") {
+                tracing::warn!(
+                    "GPG file_pattern '{}' contains path traversal; falling back to default",
+                    gpg_config.file_pattern
+                );
+                return ctx_dir.join(".env.gpg");
+            }
+        }
+        joined
     }
 
     /// Decrypt and parse the GPG env file, returning all key-value pairs.
@@ -675,5 +703,44 @@ PLAIN=value
         let content = "KEY='abc\n";
         let stored = GpgBackend::parse_stored_secrets(content);
         assert_eq!(stored.get("KEY").unwrap().value, "'abc");
+    }
+
+    #[test]
+    fn test_gpg_file_path_rejects_traversal() {
+        let config = Config {
+            defaults: Defaults {
+                gpg: crate::config::GpgConfig {
+                    file_pattern: "../../etc/shadow.gpg".to_string(),
+                    recipient: None,
+                },
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+        let dir = std::path::Path::new("/some/dir");
+        let path = GpgBackend::gpg_file_path(dir, &config);
+        // Should fall back to default rather than allowing traversal
+        assert_eq!(path, PathBuf::from("/some/dir/.env.gpg"));
+    }
+
+    #[test]
+    fn test_gpg_file_path_allows_safe_pattern() {
+        let config = Config {
+            defaults: Defaults {
+                gpg: crate::config::GpgConfig {
+                    file_pattern: "secrets.gpg".to_string(),
+                    recipient: None,
+                },
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+        let dir = std::path::Path::new("/some/dir");
+        let path = GpgBackend::gpg_file_path(dir, &config);
+        assert_eq!(path, PathBuf::from("/some/dir/secrets.gpg"));
     }
 }

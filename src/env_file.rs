@@ -45,9 +45,18 @@ pub struct EnvFile {
 
 impl EnvFile {
     /// Find the .env file in the given directory.
+    /// Rejects symlinks to prevent symlink-based attacks where an attacker
+    /// replaces .env with a symlink to a controlled or sensitive file.
     pub fn find(dir: &Path) -> Option<PathBuf> {
         let env_path = dir.join(".env");
         if env_path.exists() {
+            if env_path.is_symlink() {
+                eprintln!(
+                    "pw-env: refusing to follow .env symlink at {}. Use a regular file.",
+                    env_path.display()
+                );
+                return None;
+            }
             Some(env_path)
         } else {
             None
@@ -56,6 +65,12 @@ impl EnvFile {
 
     /// Parse a .env file, classifying each entry.
     pub fn parse(path: &Path) -> Result<Self> {
+        if path.is_symlink() {
+            anyhow::bail!(
+                "Refusing to read .env symlink at {}. Use a regular file.",
+                path.display()
+            );
+        }
         debug!("Parsing .env file: {}", path.display());
         let file = std::fs::File::open(path)
             .with_context(|| format!("Failed to open .env file: {}", path.display()))?;
@@ -265,7 +280,10 @@ fn strip_quotes(value: &str) -> String {
     if (value.starts_with('"') && value.ends_with('"'))
         || (value.starts_with('\'') && value.ends_with('\''))
     {
-        value[1..value.len() - 1].to_string()
+        let mut chars = value.chars();
+        chars.next();
+        chars.next_back();
+        chars.collect()
     } else {
         value.to_string()
     }
@@ -764,5 +782,38 @@ mod tests {
 
         std::fs::write(&path, contents).expect("temp env file should be writable");
         path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_rejects_symlinked_env_file() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let real_env = temp_dir.path().join("real.env");
+        std::fs::write(&real_env, "KEY=value\n").unwrap();
+        std::os::unix::fs::symlink(&real_env, temp_dir.path().join(".env")).unwrap();
+
+        assert!(
+            EnvFile::find(temp_dir.path()).is_none(),
+            "find() should reject a .env symlink"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_rejects_symlinked_env_file() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let real_env = temp_dir.path().join("real.env");
+        std::fs::write(&real_env, "KEY=value\n").unwrap();
+        let symlink_path = temp_dir.path().join(".env");
+        std::os::unix::fs::symlink(&real_env, &symlink_path).unwrap();
+
+        let result = EnvFile::parse(&symlink_path);
+        assert!(result.is_err(), "parse() should reject a .env symlink");
+    }
+
+    #[test]
+    fn strip_quotes_handles_multibyte_utf8() {
+        assert_eq!(strip_quotes("\"héllo\""), "héllo");
+        assert_eq!(strip_quotes("'日本語'"), "日本語");
     }
 }

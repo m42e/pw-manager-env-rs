@@ -444,8 +444,17 @@ impl ReleaseCheckState {
 
         let contents = serde_json::to_string_pretty(self)
             .context("failed to serialize release check state")?;
-        std::fs::write(path, contents)
-            .with_context(|| format!("failed to write release check state to {}", path.display()))
+        std::fs::write(path, &contents)
+            .with_context(|| format!("failed to write release check state to {}", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(path, perms).with_context(|| {
+                format!("failed to set permissions on {}", path.display())
+            })?;
+        }
+        Ok(())
     }
 
     fn is_due(&self, now: u64, interval: Duration) -> bool {
