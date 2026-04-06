@@ -3,3 +3,5 @@
 profile = "mutants"
 gitignore = true
 additional_cargo_test_args = ["--all-targets"]
+# Allow 10× the baseline test time before declaring a mutant timed out.
+timeout_multiplier = 10.0
