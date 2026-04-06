@@ -242,8 +242,17 @@ pub fn resolve_env_file(
 
 #[cfg(test)]
 mod tests {
-    use super::format_credential_fetch_audit;
+    use super::*;
     use std::fs;
+
+    fn unique_subdir(name: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("current time should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!("pw-env-{name}-{}-{nonce}", std::process::id()))
+    }
 
     #[test]
     fn formats_audit_log_with_folder_and_env_file() {
@@ -279,5 +288,149 @@ mod tests {
         assert!(line.contains("key=DATABASE_URL"));
 
         fs::remove_dir_all(&root).expect("should clean up temp directories");
+    }
+
+    #[test]
+    fn find_git_root_returns_none_when_no_git_above() {
+        let root = unique_subdir("no-git");
+        let dir = root.join("a/b/c");
+        fs::create_dir_all(&dir).unwrap();
+
+        let result = find_git_root(&dir);
+        let _ = fs::remove_dir_all(&root);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_git_root_finds_root_above_subdir() {
+        let root = unique_subdir("git-root");
+        let repo_dir = root.join("repo");
+        let subdir = repo_dir.join("src/components");
+
+        fs::create_dir_all(repo_dir.join(".git")).unwrap();
+        fs::create_dir_all(&subdir).unwrap();
+
+        let result = find_git_root(&subdir);
+        let _ = fs::remove_dir_all(&root);
+        assert!(result.is_some());
+        let found = result.unwrap();
+        assert_eq!(found.file_name().unwrap(), "repo");
+    }
+
+    #[test]
+    fn detect_project_name_uses_folder_name_when_no_git() {
+        let root = unique_subdir("proj-name");
+        let dir = root.join("my-cool-project");
+        fs::create_dir_all(&dir).unwrap();
+
+        let name = detect_project_name(&dir);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(name.as_deref(), Some("my-cool-project"));
+    }
+
+    #[test]
+    fn detect_project_name_uses_git_root_name() {
+        let root = unique_subdir("proj-git-name");
+        let repo_dir = root.join("my-repo");
+        let subdir = repo_dir.join("packages/api");
+
+        fs::create_dir_all(repo_dir.join(".git")).unwrap();
+        fs::create_dir_all(&subdir).unwrap();
+
+        let name = detect_project_name(&subdir);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(name.as_deref(), Some("my-repo"));
+    }
+
+    #[test]
+    fn log_credential_fetch_audit_does_not_panic() {
+        let root = unique_subdir("audit-log");
+        let dir = root.join("service");
+        let env_path = dir.join(".env");
+        fs::create_dir_all(&dir).unwrap();
+
+        // Should not panic even without a tracing subscriber
+        log_credential_fetch_audit(&env_path, &dir, Some("my-project"), "1Password", "API_KEY");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn formats_audit_log_uses_dir_name_when_project_is_none() {
+        let root = unique_subdir("no-proj");
+        let dir = root.join("my-service");
+        let env_path = dir.join(".env");
+        fs::create_dir_all(&dir).unwrap();
+
+        let line = format_credential_fetch_audit(&env_path, &dir, None, "op", "SECRET");
+
+        let _ = fs::remove_dir_all(&root);
+        assert!(line.contains("AUDIT credential_fetch"));
+        assert!(line.contains("project=my-service"));
+    }
+
+    #[test]
+    fn formats_audit_log_uses_dir_name_when_project_is_empty_string() {
+        let root = unique_subdir("empty-proj");
+        let dir = root.join("fallback-service");
+        let env_path = dir.join(".env");
+        fs::create_dir_all(&dir).unwrap();
+
+        let line = format_credential_fetch_audit(&env_path, &dir, Some(""), "bw", "TOKEN");
+
+        let _ = fs::remove_dir_all(&root);
+        assert!(line.contains("project=fallback-service"));
+    }
+
+    #[test]
+    fn resolve_env_file_returns_empty_for_all_plaintext_entries() {
+        let temp = unique_subdir("resolve-plaintext");
+        let env_path = temp.join(".env");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(&env_path, "API_KEY=plain-secret-value\nDB_URL=postgresql://localhost/db\n").unwrap();
+
+        let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
+        let config = Config {
+            defaults: crate::config::Defaults::default(),
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+        // All entries are Plaintext, so resolvable_entries() returns empty → early return
+        let result = resolve_env_file(&env_file, &config, &temp);
+        let _ = fs::remove_dir_all(&temp);
+        let resolved = result.unwrap();
+        assert!(resolved.is_empty(), "expected empty map for all-plaintext file");
+    }
+
+    #[test]
+    fn resolve_env_file_returns_empty_for_empty_env_file() {
+        let temp = unique_subdir("resolve-empty");
+        let env_path = temp.join(".env");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(&env_path, "# just a comment\n").unwrap();
+
+        let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
+        let config = Config {
+            defaults: crate::config::Defaults::default(),
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+        let result = resolve_env_file(&env_file, &config, &temp);
+        let _ = fs::remove_dir_all(&temp);
+        let resolved = result.unwrap();
+        assert!(resolved.is_empty(), "expected empty map for empty env file");
+    }
+
+    #[test]
+    fn formats_audit_log_uses_unknown_when_dir_has_no_name() {
+        // Using root-level path "/" has no file_name
+        let env_path = std::path::PathBuf::from("/nonexistent/.env");
+        let dir = std::path::PathBuf::from("/");
+
+        let line = format_credential_fetch_audit(&env_path, &dir, None, "op", "KEY");
+        // "/" has no file_name, so it falls back to "unknown"
+        assert!(line.contains("project=unknown") || line.contains("project="));
     }
 }

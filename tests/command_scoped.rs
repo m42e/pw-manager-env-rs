@@ -164,13 +164,265 @@ fn create_failing_executable(path: &Path) {
     set_executable(path);
 }
 
-fn set_executable(path: &Path) {
+fn set_executable(_path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        let mut permissions = std::fs::metadata(_path).unwrap().permissions();
         permissions.set_mode(0o755);
-        std::fs::set_permissions(path, permissions).unwrap();
+        std::fs::set_permissions(_path, permissions).unwrap();
     }
+}
+
+#[test]
+fn init_outputs_bash_hook() {
+    let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("init")
+        .arg("bash")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("__pw_env_hook"));
+}
+
+#[test]
+fn init_outputs_zsh_hook() {
+    let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("init")
+        .arg("zsh")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("chpwd"));
+}
+
+#[test]
+fn init_outputs_fish_hook() {
+    let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("init")
+        .arg("fish")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--on-variable PWD"));
+}
+
+#[test]
+fn config_template_prints_defaults() {
+    let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("config-template")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[defaults]"));
+    assert!(stdout.contains("backend"));
+}
+
+#[test]
+fn check_succeeds_even_without_backends() {
+    let workspace = TempDir::new().unwrap();
+    let xdg_config_home = workspace.path().join("xdg");
+    std::fs::create_dir_all(xdg_config_home.join("pw-env")).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("check")
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+}
+
+#[test]
+fn approvals_list_shows_empty_when_no_approvals() {
+    let workspace = TempDir::new().unwrap();
+    let xdg_state_home = workspace.path().join("state");
+    std::fs::create_dir_all(&xdg_state_home).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("approvals")
+        .arg("list")
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .env("HOME", workspace.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("No approved"));
+}
+
+#[test]
+fn approvals_list_fetch_shows_empty_when_no_approvals() {
+    let workspace = TempDir::new().unwrap();
+    let xdg_state_home = workspace.path().join("state");
+    std::fs::create_dir_all(&xdg_state_home).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("approvals")
+        .arg("list-fetch")
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .env("HOME", workspace.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("No approved"));
+}
+
+#[test]
+fn approvals_approve_and_show_project_override() {
+    let workspace = TempDir::new().unwrap();
+    let project_dir = workspace.path().join("project");
+    let xdg_state_home = workspace.path().join("state");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::create_dir_all(&xdg_state_home).unwrap();
+    std::fs::write(project_dir.join(".pw-env.toml"), "backend = \"op\"\n").unwrap();
+
+    let approve = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("approvals")
+        .arg("approve")
+        .arg(&project_dir)
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .env("HOME", workspace.path())
+        .output()
+        .unwrap();
+    assert!(approve.status.success(), "approve should succeed");
+
+    let show = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("approvals")
+        .arg("show")
+        .arg(&project_dir)
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .env("HOME", workspace.path())
+        .output()
+        .unwrap();
+    assert!(show.status.success(), "show should succeed");
+    let stderr = String::from_utf8_lossy(&show.stderr);
+    assert!(stderr.contains("approved") || stderr.contains("Status"));
+}
+
+#[test]
+fn approvals_revoke_project_override() {
+    let workspace = TempDir::new().unwrap();
+    let project_dir = workspace.path().join("project");
+    let xdg_state_home = workspace.path().join("state");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::create_dir_all(&xdg_state_home).unwrap();
+    std::fs::write(project_dir.join(".pw-env.toml"), "backend = \"op\"\n").unwrap();
+
+    // Approve first
+    Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("approvals")
+        .arg("approve")
+        .arg(&project_dir)
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .env("HOME", workspace.path())
+        .output()
+        .unwrap();
+
+    // Then revoke
+    let revoke = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("approvals")
+        .arg("revoke")
+        .arg(&project_dir)
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .env("HOME", workspace.path())
+        .output()
+        .unwrap();
+    assert!(revoke.status.success(), "revoke should succeed");
+    let stderr = String::from_utf8_lossy(&revoke.stderr);
+    assert!(
+        stderr.contains("Revoked") || stderr.contains("approval"),
+        "unexpected output: {stderr}"
+    );
+}
+
+#[test]
+fn approvals_approve_fetch_and_show() {
+    let workspace = TempDir::new().unwrap();
+    let project_dir = workspace.path().join("project");
+    let xdg_state_home = workspace.path().join("state");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::create_dir_all(&xdg_state_home).unwrap();
+    std::fs::write(project_dir.join(".env"), "API_KEY=\n").unwrap();
+
+    let approve = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("approvals")
+        .arg("approve-fetch")
+        .arg(&project_dir)
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .env("HOME", workspace.path())
+        .output()
+        .unwrap();
+    assert!(approve.status.success(), "approve-fetch should succeed");
+
+    let show = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("approvals")
+        .arg("show-fetch")
+        .arg(&project_dir)
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .env("HOME", workspace.path())
+        .output()
+        .unwrap();
+    assert!(show.status.success(), "show-fetch should succeed");
+    let stderr = String::from_utf8_lossy(&show.stderr);
+    assert!(
+        stderr.contains("approved") || stderr.contains("Status"),
+        "unexpected output: {stderr}"
+    );
+}
+
+#[test]
+fn approvals_revoke_fetch() {
+    let workspace = TempDir::new().unwrap();
+    let project_dir = workspace.path().join("project");
+    let xdg_state_home = workspace.path().join("state");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::create_dir_all(&xdg_state_home).unwrap();
+    std::fs::write(project_dir.join(".env"), "API_KEY=\n").unwrap();
+
+    // Approve first
+    Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("approvals")
+        .arg("approve-fetch")
+        .arg(&project_dir)
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .env("HOME", workspace.path())
+        .output()
+        .unwrap();
+
+    // Then revoke
+    let revoke = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("approvals")
+        .arg("revoke-fetch")
+        .arg(&project_dir)
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .env("HOME", workspace.path())
+        .output()
+        .unwrap();
+    assert!(revoke.status.success(), "revoke-fetch should succeed");
+}
+
+#[test]
+fn hook_outputs_empty_for_dir_without_env_file() {
+    let workspace = TempDir::new().unwrap();
+    let project_dir = workspace.path().join("project");
+    let xdg_config_home = workspace.path().join("xdg");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::create_dir_all(xdg_config_home.join("pw-env")).unwrap();
+    // No .env file in project_dir
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("hook")
+        .arg(&project_dir)
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.is_empty(), "expected empty output, got: {stdout}");
 }

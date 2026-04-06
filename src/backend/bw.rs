@@ -330,11 +330,138 @@ impl Backend for BwBackend {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::config::{Config, Defaults, LogConfig, UpdateConfig};
+    use crate::config::{BwConfig, Config, Defaults, LogConfig, UpdateConfig};
     use std::path::Path;
+
+    #[test]
+    fn test_parse_bw_reference_two_parts() {
+        let result = BwBackend::parse_bw_reference("bw://item/field");
+        assert_eq!(result, Some((None, "item", "field")));
+    }
+
+    #[test]
+    fn test_parse_bw_reference_three_parts() {
+        let result = BwBackend::parse_bw_reference("bw://folder/item/field");
+        assert_eq!(result, Some((Some("folder"), "item", "field")));
+    }
+
+    #[test]
+    fn test_parse_bw_reference_invalid_only_one_part() {
+        let result = BwBackend::parse_bw_reference("bw://item");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_bw_reference_no_prefix() {
+        let result = BwBackend::parse_bw_reference("item/field");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_field_from_value_password() {
+        let item = serde_json::json!({
+            "login": { "password": "secret123" }
+        });
+        let result = BwBackend::extract_field_from_value(&item, "password");
+        assert_eq!(result.unwrap(), "secret123");
+    }
+
+    #[test]
+    fn test_extract_field_from_value_username() {
+        let item = serde_json::json!({
+            "login": { "username": "user@example.com" }
+        });
+        let result = BwBackend::extract_field_from_value(&item, "username");
+        assert_eq!(result.unwrap(), "user@example.com");
+    }
+
+    #[test]
+    fn test_extract_field_from_value_custom_field() {
+        let item = serde_json::json!({
+            "fields": [
+                { "name": "API_KEY", "value": "abc123", "type": 1 }
+            ]
+        });
+        let result = BwBackend::extract_field_from_value(&item, "API_KEY");
+        assert_eq!(result.unwrap(), "abc123");
+    }
+
+    #[test]
+    fn test_extract_field_from_value_notes() {
+        let item = serde_json::json!({
+            "notes": "some secure notes"
+        });
+        let result = BwBackend::extract_field_from_value(&item, "notes");
+        assert_eq!(result.unwrap(), "some secure notes");
+    }
+
+    #[test]
+    fn test_extract_field_from_value_missing() {
+        let item = serde_json::json!({});
+        let result = BwBackend::extract_field_from_value(&item, "password");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_field_from_item_valid_json() {
+        let item_json = r#"{"login": {"password": "mypass"}}"#;
+        let result = BwBackend::extract_field_from_item(item_json, "password");
+        assert_eq!(result.unwrap(), "mypass");
+    }
+
+    #[test]
+    fn test_extract_field_from_item_invalid_json() {
+        let result = BwBackend::extract_field_from_item("not valid json", "password");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_base64_encode_known_value() {
+        // "Man" encodes to "TWFu" in standard base64
+        assert_eq!(base64_encode(b"Man"), "TWFu");
+    }
+
+    #[test]
+    fn test_base64_encode_empty() {
+        assert_eq!(base64_encode(b""), "");
+    }
+
+    #[test]
+    fn test_base64_encode_single_byte() {
+        // "M" encodes to "TQ==" in standard base64
+        assert_eq!(base64_encode(b"M"), "TQ==");
+    }
+
+    #[test]
+    fn test_upsert_custom_field_adds_new_field() {
+        let mut item = serde_json::json!({ "fields": [] });
+        BwBackend::upsert_custom_field(&mut item, "api_key", "value123", 0);
+        let fields = item.get("fields").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(
+            fields[0].get("name").and_then(|v| v.as_str()),
+            Some("api_key")
+        );
+        assert_eq!(
+            fields[0].get("value").and_then(|v| v.as_str()),
+            Some("value123")
+        );
+    }
+
+    #[test]
+    fn test_upsert_custom_field_creates_fields_array_when_absent() {
+        let mut item = serde_json::json!({});
+        BwBackend::upsert_custom_field(&mut item, "key", "val", 0);
+        let fields = item.get("fields").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(
+            fields[0].get("name").and_then(|v| v.as_str()),
+            Some("key")
+        );
+    }
 
     fn test_store_context() -> StoreContext<'static> {
         let config = Box::leak(Box::new(Config {
@@ -349,6 +476,237 @@ mod tests {
             config,
             project: Some("example".to_string()),
         }
+    }
+
+    // ------- Mock-bw infrastructure -------
+
+    fn with_mock_bw<F: FnOnce()>(script: &str, f: F) {
+        let _guard = super::super::MOCK_PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::TempDir::new().unwrap();
+        let script_path = dir.path().join("bw");
+        std::fs::write(&script_path, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).unwrap();
+        }
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let new_path = std::env::join_paths(
+            std::iter::once(dir.path().to_path_buf())
+                .chain(std::env::split_paths(&old_path)),
+        )
+        .unwrap();
+        // SAFETY: guarded by MOCK_PATH_MUTEX, single-threaded access to PATH here
+        unsafe { std::env::set_var("PATH", &new_path) };
+        f();
+        unsafe { std::env::set_var("PATH", &old_path) };
+    }
+
+    fn make_bw_item_json(password: &str) -> String {
+        format!(r#"{{"type":1,"name":"test-item","login":{{"password":"{password}"}}}}"#)
+    }
+
+    fn make_resolve_context<'a>(config: &'a Config, dir: &'a Path) -> super::super::ResolveContext<'a> {
+        super::super::ResolveContext {
+            dir,
+            config,
+            project: Some("test-project".to_string()),
+        }
+    }
+
+    #[test]
+    fn run_bw_returns_stdout_on_success() {
+        with_mock_bw("#!/bin/sh\necho 'hello-value'\n", || {
+            let result = BwBackend::run_bw(&["any", "arg"]);
+            assert_eq!(result.unwrap(), "hello-value");
+        });
+    }
+
+    #[test]
+    fn run_bw_returns_err_on_non_zero_exit() {
+        with_mock_bw("#!/bin/sh\necho 'error output' >&2\nexit 1\n", || {
+            let result = BwBackend::run_bw(&["any", "arg"]);
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn backend_resolve_with_bw_reference() {
+        let item_json = make_bw_item_json("secret-pw");
+        let script = format!("#!/bin/sh\necho '{}'\n", item_json);
+        with_mock_bw(&script, || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let dir = std::path::Path::new("/tmp");
+            let ctx = make_resolve_context(&config, dir);
+            let backend = BwBackend;
+            let result = backend.resolve("API_KEY", Some("bw://my-item/password"), &ctx);
+            assert_eq!(result.unwrap(), "secret-pw");
+        });
+    }
+
+    #[test]
+    fn backend_resolve_direct_password_lookup() {
+        with_mock_bw("#!/bin/sh\necho 'direct-password'\n", || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let dir = std::path::Path::new("/tmp");
+            let ctx = make_resolve_context(&config, dir);
+            let backend = BwBackend;
+            let result = backend.resolve("MY_KEY", None, &ctx);
+            assert_eq!(result.unwrap(), "direct-password");
+        });
+    }
+
+    #[test]
+    fn backend_has_returns_true_when_resolve_succeeds() {
+        with_mock_bw("#!/bin/sh\necho 'some-value'\n", || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let dir = std::path::Path::new("/tmp");
+            let ctx = make_resolve_context(&config, dir);
+            let backend = BwBackend;
+            assert_eq!(backend.has("MY_KEY", &ctx).unwrap(), true);
+        });
+    }
+
+    #[test]
+    fn backend_has_returns_false_when_resolve_fails() {
+        with_mock_bw("#!/bin/sh\necho 'error' >&2\nexit 1\n", || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let dir = std::path::Path::new("/tmp");
+            let ctx = make_resolve_context(&config, dir);
+            let backend = BwBackend;
+            assert_eq!(backend.has("MY_KEY", &ctx).unwrap(), false);
+        });
+    }
+
+    #[test]
+    fn backend_name_is_bitwarden() {
+        assert_eq!(BwBackend.name(), "Bitwarden");
+    }
+
+    #[test]
+    fn backend_resolve_returns_err_for_invalid_bw_reference() {
+        with_mock_bw("#!/bin/sh\necho 'ignored'\n", || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = make_resolve_context(&config, std::path::Path::new("/tmp"));
+            // "bw://invalid" has only one path segment, parse_bw_reference returns None
+            let result = BwBackend.resolve("KEY", Some("bw://invalid"), &ctx);
+            assert!(result.is_err());
+            let msg = format!("{}", result.unwrap_err());
+            assert!(msg.contains("Invalid bw:// reference format"), "unexpected: {msg}");
+        });
+    }
+
+    #[test]
+    fn backend_resolve_with_item_configured() {
+        let item_json = r#"{"type":1,"name":"my-bw-item","fields":[{"name":"MY_KEY","value":"item-field-value"}],"login":{"password":""}}"#;
+        let script = format!("#!/bin/sh\necho '{}'\n", item_json);
+        with_mock_bw(&script, || {
+            let config = Config {
+                defaults: Defaults {
+                    backend: "bw".to_string(),
+                    bw: BwConfig {
+                        item: Some("my-bw-item".to_string()),
+                        ..Default::default()
+                    },
+                    ..Defaults::default()
+                },
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = make_resolve_context(&config, std::path::Path::new("/tmp"));
+            let result = BwBackend.resolve("MY_KEY", None, &ctx);
+            assert_eq!(result.unwrap(), "item-field-value");
+        });
+    }
+
+    #[test]
+    fn backend_resolve_falls_back_to_item_json_on_password_error() {
+        let item_json = r#"{"type":1,"name":"MY_KEY","login":{"password":"fallback-password"}}"#;
+        // Return error for "get password", item JSON for everything else
+        let script = format!(
+            "#!/bin/sh\nif [ \"$2\" = \"password\" ]; then\necho 'Item not found' >&2\nexit 1\nfi\necho '{}'\n",
+            item_json
+        );
+        with_mock_bw(&script, || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = make_resolve_context(&config, std::path::Path::new("/tmp"));
+            let result = BwBackend.resolve("MY_KEY", None, &ctx);
+            assert_eq!(result.unwrap(), "fallback-password");
+        });
+    }
+
+    #[test]
+    fn backend_resolve_disambiguates_by_project_single_match() {
+        // Return "more than one" error for "get password", items list for "list items"
+        let items_json = r#"[{"name":"MY_KEY","id":"abc123","login":{"password":"project-pw"},"fields":[]}]"#;
+        let script = format!(
+            "#!/bin/sh\nif [ \"$2\" = \"password\" ]; then\necho 'more than one result was found' >&2\nexit 1\nfi\necho '{}'\n",
+            items_json
+        );
+        with_mock_bw(&script, || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = make_resolve_context(&config, std::path::Path::new("/tmp"));
+            let result = BwBackend.resolve("MY_KEY", None, &ctx);
+            assert_eq!(result.unwrap(), "project-pw");
+        });
+    }
+
+    #[test]
+    fn backend_store_creates_new_item_when_no_item_config() {
+        // Mock bw that accepts stdin, exits 0 for create
+        with_mock_bw("#!/bin/sh\ncat >/dev/null\necho 'created'\n", || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = StoreContext {
+                dir: Path::new("/tmp"),
+                config: &config,
+                project: None,
+            };
+            let result = BwBackend.store("NEW_KEY", "new-value", &ctx);
+            assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        });
     }
 
     #[test]
@@ -389,6 +747,38 @@ mod tests {
             fields[0].get("value").and_then(|value| value.as_str()),
             Some("new")
         );
+    }
+
+    #[test]
+    fn backend_store_edits_existing_item_when_item_configured() {
+        // Mock bw: "get item" returns existing item JSON; "edit item" reads stdin and exits 0
+        let item_json = r#"{"id":"item123","name":"my-bw-item","type":1,"login":{"password":"old"},"fields":[]}"#;
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ]; then\necho '{}'\nexit 0\nfi\ncat >/dev/null\necho 'edited'\nexit 0\n",
+            item_json
+        );
+        with_mock_bw(&script, || {
+            let config = Config {
+                defaults: Defaults {
+                    backend: "bw".to_string(),
+                    bw: BwConfig {
+                        item: Some("my-bw-item".to_string()),
+                        ..Default::default()
+                    },
+                    ..Defaults::default()
+                },
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = StoreContext {
+                dir: Path::new("/tmp"),
+                config: &config,
+                project: None,
+            };
+            let result = BwBackend.store("MY_KEY", "my-value", &ctx);
+            assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        });
     }
 }
 

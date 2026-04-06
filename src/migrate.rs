@@ -54,7 +54,7 @@ pub fn migrate(dir: &Path, config: &Config) -> Result<()> {
     let backend_name = config.effective_backend(dir);
     eprintln!("These will be stored in the '{}' backend.", backend_name);
 
-    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+    if !is_interactive() {
         anyhow::bail!("pw-env migrate requires an interactive terminal to select entries");
     }
 
@@ -148,6 +148,10 @@ pub fn migrate(dir: &Path, config: &Config) -> Result<()> {
     Ok(())
 }
 
+fn is_interactive() -> bool {
+    cfg!(not(test)) && std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
 fn mask_value(value: &str) -> String {
     let v = strip_quotes(value);
     if v.len() <= 3 {
@@ -200,4 +204,125 @@ fn prompt_for_entries(
         .context("Migration selection was interrupted")?;
 
     Ok(selected.into_iter().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn migrate_returns_err_when_no_env_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = crate::config::Config {
+            defaults: crate::config::Defaults::default(),
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+        let result = migrate(temp_dir.path(), &config);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("No .env file found"));
+    }
+
+    #[test]
+    fn migrate_returns_ok_with_no_plaintext_entries() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        // An env file with only empty/op/bw entries — no plaintext
+        fs::write(&env_path, "API_KEY=op://vault/item/field\nDB_URL=\n").unwrap();
+        let config = crate::config::Config {
+            defaults: crate::config::Defaults::default(),
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+        let result = migrate(temp_dir.path(), &config);
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+    }
+
+    #[test]
+    fn migrate_bails_with_plaintext_and_non_interactive_stdin() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        // Plaintext entry that looks like a secret
+        fs::write(
+            &env_path,
+            "API_KEY=super_secret_value_that_is_long_enough\n",
+        )
+        .unwrap();
+        let config = crate::config::Config {
+            defaults: crate::config::Defaults::default(),
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+        // In test env, stdin is not a terminal, so this should bail
+        let result = migrate(temp_dir.path(), &config);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("interactive terminal"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_mask_value_short() {
+        assert_eq!(mask_value("ab"), "***");
+    }
+
+    #[test]
+    fn test_mask_value_exactly_three_chars() {
+        assert_eq!(mask_value("abc"), "***");
+    }
+
+    #[test]
+    fn test_mask_value_longer_than_three() {
+        assert_eq!(mask_value("abcdef"), "abc***");
+    }
+
+    #[test]
+    fn test_mask_value_quoted_double() {
+        // Quotes are stripped before masking
+        assert_eq!(mask_value("\"secretvalue\""), "sec***");
+    }
+
+    #[test]
+    fn test_mask_value_quoted_single() {
+        assert_eq!(mask_value("'mysecret'"), "mys***");
+    }
+
+    #[test]
+    fn test_strip_quotes_double_quoted() {
+        assert_eq!(strip_quotes("\"hello\""), "hello");
+    }
+
+    #[test]
+    fn test_strip_quotes_single_quoted() {
+        assert_eq!(strip_quotes("'hello'"), "hello");
+    }
+
+    #[test]
+    fn test_strip_quotes_unquoted() {
+        assert_eq!(strip_quotes("hello"), "hello");
+    }
+
+    #[test]
+    fn test_strip_quotes_trims_surrounding_whitespace() {
+        assert_eq!(strip_quotes("  hello  "), "hello");
+    }
+
+    #[test]
+    fn test_strip_quotes_mismatched_not_stripped() {
+        // Mismatched quotes: starts with " but ends with '
+        assert_eq!(strip_quotes("\"hello'"), "\"hello'");
+    }
+
+    #[test]
+    fn test_strip_quotes_single_char_between_quotes() {
+        assert_eq!(strip_quotes("\"a\""), "a");
+    }
 }

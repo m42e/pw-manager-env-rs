@@ -246,11 +246,53 @@ impl Backend for OpBackend {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::config::{Config, Defaults, LogConfig, UpdateConfig};
     use std::path::Path;
+
+    #[test]
+    fn test_text_field_assignment_format() {
+        let result = OpBackend::text_field_assignment("api_key", "myvalue");
+        assert_eq!(result, "api_key[text]=myvalue");
+    }
+
+    #[test]
+    fn test_migration_field_assignments_with_project() {
+        let config = Config {
+            defaults: Defaults::default(),
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+        let ctx = StoreContext {
+            dir: Path::new("/work/project"),
+            config: &config,
+            project: Some("my-project".to_string()),
+        };
+        let assignments = OpBackend::migration_field_assignments(&ctx);
+        assert!(assignments.contains(&"migrated_from[text]=/work/project".to_string()));
+        assert!(assignments.contains(&"project[text]=my-project".to_string()));
+    }
+
+    #[test]
+    fn test_migration_field_assignments_without_project() {
+        let config = Config {
+            defaults: Defaults::default(),
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+        let ctx = StoreContext {
+            dir: Path::new("/work/project"),
+            config: &config,
+            project: None,
+        };
+        let assignments = OpBackend::migration_field_assignments(&ctx);
+        assert!(assignments.contains(&"migrated_from[text]=/work/project".to_string()));
+        assert_eq!(assignments.len(), 1);
+    }
 
     #[test]
     fn test_migration_field_assignments_include_project_and_source_dir() {
@@ -270,5 +312,260 @@ mod tests {
 
         assert!(assignments.contains(&"migrated_from[text]=/tmp/example/service".to_string()));
         assert!(assignments.contains(&"project[text]=example".to_string()));
+    }
+
+    // ------- Mock-op infrastructure -------
+
+    fn with_mock_op<F: FnOnce()>(script: &str, f: F) {
+        let _guard = super::super::MOCK_PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::TempDir::new().unwrap();
+        let script_path = dir.path().join("op");
+        std::fs::write(&script_path, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).unwrap();
+        }
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let new_path = std::env::join_paths(
+            std::iter::once(dir.path().to_path_buf())
+                .chain(std::env::split_paths(&old_path)),
+        )
+        .unwrap();
+        // SAFETY: guarded by MOCK_PATH_MUTEX, single-threaded access to PATH
+        unsafe { std::env::set_var("PATH", &new_path) };
+        f();
+        unsafe { std::env::set_var("PATH", &old_path) };
+    }
+
+    fn make_op_resolve_context<'a>(config: &'a Config, dir: &'a Path) -> super::super::ResolveContext<'a> {
+        super::super::ResolveContext {
+            dir,
+            config,
+            project: Some("test-project".to_string()),
+        }
+    }
+
+    #[test]
+    fn run_op_returns_stdout_on_success() {
+        with_mock_op("#!/bin/sh\necho 'op-value'\n", || {
+            let result = OpBackend::run_op(&["any", "arg"], None);
+            assert_eq!(result.unwrap(), "op-value");
+        });
+    }
+
+    #[test]
+    fn run_op_returns_err_on_non_zero_exit() {
+        with_mock_op("#!/bin/sh\necho 'error' >&2\nexit 1\n", || {
+            let result = OpBackend::run_op(&["any", "arg"], None);
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn backend_resolve_with_op_reference() {
+        with_mock_op("#!/bin/sh\necho 'op-secret'\n", || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let dir = Path::new("/tmp");
+            let ctx = make_op_resolve_context(&config, dir);
+            let backend = OpBackend;
+            let result = backend.resolve("API_KEY", Some("op://vault/item/field"), &ctx);
+            assert_eq!(result.unwrap(), "op-secret");
+        });
+    }
+
+    #[test]
+    fn backend_has_returns_true_when_resolve_succeeds() {
+        with_mock_op("#!/bin/sh\necho 'some-value'\n", || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let dir = Path::new("/tmp");
+            let ctx = make_op_resolve_context(&config, dir);
+            let backend = OpBackend;
+            assert_eq!(backend.has("MY_KEY", &ctx).unwrap(), true);
+        });
+    }
+
+    #[test]
+    fn backend_has_returns_false_when_resolve_fails() {
+        with_mock_op("#!/bin/sh\necho 'error' >&2\nexit 1\n", || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let dir = Path::new("/tmp");
+            let ctx = make_op_resolve_context(&config, dir);
+            let backend = OpBackend;
+            assert_eq!(backend.has("MY_KEY", &ctx).unwrap(), false);
+        });
+    }
+
+    #[test]
+    fn backend_name_is_1password() {
+        assert_eq!(OpBackend.name(), "1Password");
+    }
+
+    #[test]
+    fn run_op_with_account_argument() {
+        with_mock_op("#!/bin/sh\necho 'acct-value'\n", || {
+            let result = OpBackend::run_op(&["item", "get", "test"], Some("my-account"));
+            assert_eq!(result.unwrap(), "acct-value");
+        });
+    }
+
+    #[test]
+    fn get_item_field_with_vault_arg() {
+        with_mock_op("#!/bin/sh\necho 'vault-secret'\n", || {
+            let result = OpBackend::get_item_field("my-item", "label=password", Some("MyVault"), None);
+            assert_eq!(result.unwrap(), "vault-secret");
+        });
+    }
+
+    #[test]
+    fn backend_resolve_with_item_configured() {
+        with_mock_op("#!/bin/sh\necho 'item-field-value'\n", || {
+            let config = Config {
+                defaults: Defaults {
+                    op: crate::config::OpConfig {
+                        item: Some("my-op-item".to_string()),
+                        ..Default::default()
+                    },
+                    ..Defaults::default()
+                },
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = make_op_resolve_context(&config, Path::new("/tmp"));
+            let result = OpBackend.resolve("MY_KEY", None, &ctx);
+            assert_eq!(result.unwrap(), "item-field-value");
+        });
+    }
+
+    #[test]
+    fn backend_resolve_with_vault_configured() {
+        with_mock_op("#!/bin/sh\necho 'vault-item-value'\n", || {
+            let config = Config {
+                defaults: Defaults {
+                    op: crate::config::OpConfig {
+                        vault: Some("MyVault".to_string()),
+                        ..Default::default()
+                    },
+                    ..Defaults::default()
+                },
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = make_op_resolve_context(&config, Path::new("/tmp"));
+            let result = OpBackend.resolve("MY_KEY", None, &ctx);
+            assert_eq!(result.unwrap(), "vault-item-value");
+        });
+    }
+
+    #[test]
+    fn backend_resolve_with_vault_disambiguates_by_project_single_match() {
+        // First call: op item get MY_KEY --fields ... → "more than 1 item found" (triggers disambiguation)
+        // Second call: op item list → single-item list
+        // Third call: op item get abc123 --fields ... (by id) → "resolved-value"
+        let script =
+            "#!/bin/sh\nif [ \"$2\" = \"get\" ] && [ \"$3\" = \"MY_KEY\" ]; then\necho 'more than 1 item found' >&2\nexit 1\nfi\nif [ \"$2\" = \"list\" ]; then\necho '[{\"id\":\"abc123\",\"title\":\"MY_KEY\"}]'\nexit 0\nfi\necho 'resolved-value'\n";
+        with_mock_op(script, || {
+            let config = Config {
+                defaults: Defaults {
+                    op: crate::config::OpConfig {
+                        vault: Some("MyVault".to_string()),
+                        ..Default::default()
+                    },
+                    ..Defaults::default()
+                },
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = make_op_resolve_context(&config, Path::new("/tmp"));
+            let result = OpBackend.resolve("MY_KEY", None, &ctx);
+            assert_eq!(result.unwrap(), "resolved-value");
+        });
+    }
+
+    #[test]
+    fn backend_resolve_no_item_no_vault() {
+        with_mock_op("#!/bin/sh\necho 'no-vault-value'\n", || {
+            let config = Config {
+                defaults: Defaults::default(), // no item, no vault
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = make_op_resolve_context(&config, Path::new("/tmp"));
+            let result = OpBackend.resolve("MY_KEY", None, &ctx);
+            assert_eq!(result.unwrap(), "no-vault-value");
+        });
+    }
+
+    #[test]
+    fn backend_store_with_item_configured_succeeds() {
+        with_mock_op("#!/bin/sh\necho 'edited'\n", || {
+            let config = Config {
+                defaults: Defaults {
+                    op: crate::config::OpConfig {
+                        item: Some("my-op-item".to_string()),
+                        ..Default::default()
+                    },
+                    ..Defaults::default()
+                },
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = StoreContext {
+                dir: Path::new("/tmp"),
+                config: &config,
+                project: None,
+            };
+            let result = OpBackend.store("MY_KEY", "my-value", &ctx);
+            assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        });
+    }
+
+    #[test]
+    fn backend_store_creates_new_item_when_no_item_config() {
+        with_mock_op("#!/bin/sh\necho 'created'\n", || {
+            let config = Config {
+                defaults: Defaults::default(), // no item configured
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = StoreContext {
+                dir: Path::new("/tmp"),
+                config: &config,
+                project: None,
+            };
+            let result = OpBackend.store("NEW_KEY", "new-value", &ctx);
+            assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        });
+    }
+
+    #[test]
+    fn get_item_field_calls_run_op_with_item_args() {
+        with_mock_op("#!/bin/sh\necho 'field-value'\n", || {
+            let result = OpBackend::get_item_field("my-item", "label=password", None, None);
+            assert_eq!(result.unwrap(), "field-value");
+        });
     }
 }

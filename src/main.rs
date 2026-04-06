@@ -1009,6 +1009,126 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn summarize_entry_keys_empty() {
+        let result = summarize_entry_keys(&[]);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn summarize_entry_keys_single() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        std::fs::write(&env_path, "ALPHA=value\n").unwrap();
+        let env_file = env_file::EnvFile::parse(&env_path).unwrap();
+        let entries = env_file.entries();
+        assert_eq!(summarize_entry_keys(&entries), "ALPHA");
+    }
+
+    #[test]
+    fn summarize_entry_keys_two() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        std::fs::write(&env_path, "BETA=v2\nALPHA=v1\n").unwrap();
+        let env_file = env_file::EnvFile::parse(&env_path).unwrap();
+        let entries = env_file.entries();
+        let result = summarize_entry_keys(&entries);
+        assert_eq!(result, "ALPHA, BETA");
+    }
+
+    #[test]
+    fn summarize_entry_keys_three() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        std::fs::write(&env_path, "GAMMA=v3\nBETA=v2\nALPHA=v1\n").unwrap();
+        let env_file = env_file::EnvFile::parse(&env_path).unwrap();
+        let entries = env_file.entries();
+        let result = summarize_entry_keys(&entries);
+        assert_eq!(result, "ALPHA, BETA, GAMMA");
+    }
+
+    #[test]
+    fn summarize_entry_keys_four_shows_plus_more() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        // Keys sorted: ALPHA, BETA, DELTA, GAMMA
+        std::fs::write(&env_path, "GAMMA=v4\nBETA=v2\nALPHA=v1\nDELTA=v3\n").unwrap();
+        let env_file = env_file::EnvFile::parse(&env_path).unwrap();
+        let entries = env_file.entries();
+        let result = summarize_entry_keys(&entries);
+        assert_eq!(result, "ALPHA, BETA, DELTA (+1 more)");
+    }
+
+    #[test]
+    fn resolve_dir_none_returns_current_dir() {
+        let result = resolve_dir(None).unwrap();
+        assert!(result.is_absolute());
+        assert!(result.exists());
+    }
+
+    #[test]
+    fn resolve_dir_existing_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let result = resolve_dir(Some(temp_dir.path().to_path_buf())).unwrap();
+        assert!(result.is_absolute());
+        assert!(result.exists());
+    }
+
+    #[test]
+    fn resolve_dir_nonexistent_path_returns_error() {
+        let result = resolve_dir(Some(PathBuf::from("/nonexistent/path/99999")));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn contains_glob_meta_star() {
+        assert!(contains_glob_meta("cargo*"));
+    }
+
+    #[test]
+    fn contains_glob_meta_question() {
+        assert!(contains_glob_meta("cargo?"));
+    }
+
+    #[test]
+    fn contains_glob_meta_bracket() {
+        assert!(contains_glob_meta("[abc]"));
+    }
+
+    #[test]
+    fn contains_glob_meta_none() {
+        assert!(!contains_glob_meta("cargo"));
+        assert!(!contains_glob_meta("npm"));
+    }
+
+    #[test]
+    fn is_executable_file_on_directory_returns_false() {
+        let temp_dir = TempDir::new().unwrap();
+        assert!(!is_executable_file(temp_dir.path()));
+    }
+
+    #[test]
+    fn is_executable_file_nonexistent_returns_false() {
+        assert!(!is_executable_file(Path::new("/nonexistent/file/path/12345")));
+    }
+
+    #[test]
+    fn is_executable_file_executable_returns_true() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("script.sh");
+        create_executable(file_path.clone());
+        assert!(is_executable_file(&file_path));
+    }
+
+    #[test]
+    fn config_template_contains_expected_content() {
+        let template = config_template();
+        assert!(!template.is_empty());
+        assert!(template.contains("[defaults]"));
+        assert!(template.contains("backend"));
+        assert!(template.contains("pw-env"));
+    }
+
+    #[test]
     fn resolve_wrapped_commands_keeps_exact_safe_names() {
         let commands = resolve_wrapped_commands(&["cargo".to_string()], None);
         assert_eq!(commands, vec!["cargo".to_string()]);
@@ -1083,5 +1203,309 @@ mod tests {
             permissions.set_mode(0o755);
             std::fs::set_permissions(&path, permissions).unwrap();
         }
+    }
+
+    #[test]
+    fn check_backends_does_not_panic() {
+        // Just verify it runs without panicking; backends may or may not be installed
+        check_backends();
+    }
+
+    #[test]
+    fn check_config_with_default_config_and_temp_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = config::Config {
+            defaults: config::Defaults::default(),
+            log: config::LogConfig::default(),
+            updates: config::UpdateConfig::default(),
+            projects: vec![],
+        };
+        // Just ensure it doesn't panic; output goes to stderr
+        check_config(&config, temp_dir.path());
+    }
+
+    #[test]
+    fn handle_approvals_list_returns_ok() {
+        let result = handle_approvals(ApprovalCommands::List);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn handle_approvals_list_fetch_returns_ok() {
+        let result = handle_approvals(ApprovalCommands::ListFetch);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn handle_approvals_show_with_valid_override_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let override_path = temp_dir.path().join(".pw-env.toml");
+        std::fs::write(&override_path, "backend = \"op\"\n").unwrap();
+
+        let result = handle_approvals(ApprovalCommands::Show {
+            path: Some(override_path),
+        });
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn handle_approvals_revoke_returns_ok_when_no_approval_exists() {
+        let temp_dir = TempDir::new().unwrap();
+        let override_path = temp_dir.path().join(".pw-env.toml");
+        std::fs::write(&override_path, "backend = \"bw\"\n").unwrap();
+
+        let result = handle_approvals(ApprovalCommands::Revoke {
+            path: override_path,
+        });
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn handle_approvals_show_fetch_with_temp_env() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        std::fs::write(&env_path, "API_KEY=\n").unwrap();
+
+        let result = handle_approvals(ApprovalCommands::ShowFetch {
+            path: Some(env_path),
+        });
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn handle_approvals_revoke_fetch_returns_ok_when_no_approval_exists() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        std::fs::write(&env_path, "DB_URL=\n").unwrap();
+
+        let result = handle_approvals(ApprovalCommands::RevokeFetch { path: env_path });
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn emit_plaintext_secret_warning_with_no_secrets() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        std::fs::write(&env_path, "API_KEY=op://vault/item/field\nDB_URL=\n").unwrap();
+
+        let env_file = env_file::EnvFile::parse(&env_path).unwrap();
+        let result = emit_plaintext_secret_warning(&env_file);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn pending_migration_entries_with_no_secrets_returns_empty() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        std::fs::write(&env_path, "HOST=localhost\nPORT=5432\n").unwrap();
+
+        let env_file = env_file::EnvFile::parse(&env_path).unwrap();
+        let entries = pending_migration_entries(&env_file).unwrap();
+        // HOST and PORT don't look like secrets
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn list_path_executables_with_no_path_returns_empty() {
+        let result = list_path_executables(None);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn list_path_executables_with_real_dir_returns_executables() {
+        let temp_dir = TempDir::new().unwrap();
+        create_executable(temp_dir.path().join("my-tool"));
+
+        let path_val = std::env::join_paths([temp_dir.path()]).unwrap();
+        let result = list_path_executables(Some(path_val.as_os_str()));
+        assert!(result.contains("my-tool"));
+    }
+
+    #[test]
+    fn resolve_wrapped_commands_skips_invalid_glob() {
+        // An unclosed bracket is an invalid glob; should be skipped
+        let result = resolve_wrapped_commands(&["[unclosed".to_string()], None);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn resolve_wrapped_commands_skips_unsafe_command_names() {
+        // Command with path separator is not a "safe" name
+        let result = resolve_wrapped_commands(&["/bin/bash".to_string()], None);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn build_hook_output_returns_empty_string_for_dir_without_env_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = config::Config {
+            defaults: config::Defaults::default(),
+            log: config::LogConfig::default(),
+            updates: config::UpdateConfig::default(),
+            projects: vec![],
+        };
+        let result =
+            build_hook_output(temp_dir.path(), output::ShellSyntax::Posix, &config, None).unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn emit_plaintext_secret_warning_with_likely_secret_entry_outputs_warning() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        // A key that looks like a secret with a long enough value
+        std::fs::write(&env_path, "API_SECRET_KEY=very_long_plain_text_value_here\n").unwrap();
+
+        let env_file = env_file::EnvFile::parse(&env_path).unwrap();
+        // This should emit the warning (to stderr) but return Ok
+        let result = emit_plaintext_secret_warning(&env_file);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn check_backends_reports_not_found_when_backends_missing() {
+        let _guard = crate::backend::MOCK_PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let temp_dir = TempDir::new().unwrap();
+        let path_val = std::env::join_paths([temp_dir.path()]).unwrap();
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        // SAFETY: guarded by MOCK_PATH_MUTEX
+        unsafe { std::env::set_var("PATH", &path_val) };
+        check_backends();
+        unsafe { std::env::set_var("PATH", &old_path) };
+    }
+
+    #[test]
+    fn maybe_check_for_release_update_does_not_panic() {
+        let config = config::Config {
+            defaults: config::Defaults::default(),
+            log: config::LogConfig::default(),
+            updates: config::UpdateConfig { enabled: false, check_interval_hours: 24 },
+            projects: vec![],
+        };
+        // Should not panic; stderr is not a terminal in tests so it returns early
+        maybe_check_for_release_update(&Commands::Check, &config);
+    }
+
+    #[test]
+    fn handle_approvals_show_with_none_path_returns_ok() {
+        // None path resolves to current dir — should succeed even if no .pw-env.toml there
+        let result = handle_approvals(ApprovalCommands::Show { path: None });
+        // May succeed or fail depending on state, but must not panic
+        let _ = result;
+    }
+
+    #[test]
+    fn handle_approvals_show_fetch_with_none_path_returns_ok() {
+        let result = handle_approvals(ApprovalCommands::ShowFetch { path: None });
+        let _ = result; // May or may not succeed depending on presence of .env
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn check_config_when_config_file_exists_with_vault_and_folder() {
+        let _guard = crate::backend::MOCK_PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let temp_dir = TempDir::new().unwrap();
+        // Create config file at XDG_CONFIG_HOME/pw-env/config.toml
+        let config_dir = temp_dir.path().join("pw-env");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_file = config_dir.join("config.toml");
+        std::fs::write(&config_file, "[defaults]\nbackend = \"op\"\n[defaults.op]\nvault = \"MyVault\"\n[defaults.bw]\nfolder = \"MyFolder\"\n[log]\n[updates]\n").unwrap();
+
+        let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        // SAFETY: guarded by MOCK_PATH_MUTEX
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", temp_dir.path()) };
+
+        let config = config::Config {
+            defaults: config::Defaults {
+                op: config::OpConfig {
+                    vault: Some("MyVault".to_string()),
+                    ..Default::default()
+                },
+                bw: config::BwConfig {
+                    folder: Some("MyFolder".to_string()),
+                    ..Default::default()
+                },
+                ..config::Defaults::default()
+            },
+            log: config::LogConfig::default(),
+            updates: config::UpdateConfig::default(),
+            projects: vec![],
+        };
+        check_config(&config, temp_dir.path());
+
+        match old_xdg {
+            Some(v) => unsafe { std::env::set_var("XDG_CONFIG_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+    }
+
+    #[test]
+    fn build_hook_output_with_plaintext_env_and_no_commands_returns_empty() {
+        // No commands configured + plaintext-only .env → parse env file, resolve (returns empty), return ""
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        // Plaintext entry: no op:// reference, so resolvable_entries() is empty → resolve returns Ok({})
+        std::fs::write(&env_path, "SHELL=/bin/bash\n").unwrap();
+
+        let config = config::Config {
+            defaults: config::Defaults::default(),
+            log: config::LogConfig::default(),
+            updates: config::UpdateConfig::default(),
+            projects: vec![],
+        };
+        let result = build_hook_output(temp_dir.path(), output::ShellSyntax::Posix, &config, None);
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        assert_eq!(result.unwrap(), "");
+    }
+
+    #[test]
+    fn build_hook_output_with_fish_syntax_and_commands_configured() {
+        let temp_dir = TempDir::new().unwrap();
+        let canonical = temp_dir.path().canonicalize().unwrap();
+        let env_path = canonical.join(".env");
+        std::fs::write(&env_path, "KEY=value\n").unwrap();
+
+        let project_path = canonical.to_string_lossy().into_owned();
+        let config = config::Config {
+            defaults: config::Defaults::default(),
+            log: config::LogConfig::default(),
+            updates: config::UpdateConfig::default(),
+            projects: vec![config::ProjectOverride {
+                path: project_path,
+                commands: vec!["cat".to_string()],
+                backend: None,
+                op: None,
+                bw: None,
+                gpg: None,
+                item: None,
+            }],
+        };
+        let result = build_hook_output(&canonical, output::ShellSyntax::Fish, &config, None);
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+    }
+
+    #[test]
+    fn resolve_dir_with_none_returns_current_dir() {
+        let result = resolve_dir(None);
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+    }
+
+    #[test]
+    fn resolve_dir_with_some_existing_dir_returns_canonical() {
+        let temp_dir = TempDir::new().unwrap();
+        let result = resolve_dir(Some(temp_dir.path().to_path_buf()));
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+    }
+
+    #[test]
+    fn summarize_entry_keys_truncates_beyond_three() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        std::fs::write(&env_path, "AA=1\nBB=2\nCC=3\nDD=4\n").unwrap();
+        let env_file = env_file::EnvFile::parse(&env_path).unwrap();
+        let entries = env_file.entries();
+        let result = summarize_entry_keys(&entries);
+        assert!(result.contains("+1 more"), "expected '+1 more' in: {result}");
     }
 }

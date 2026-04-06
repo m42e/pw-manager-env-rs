@@ -428,7 +428,7 @@ impl Config {
         }
 
         let previously_approved_hashes = approvals.approved_hashes(&project_path);
-        if !io::stdin().is_terminal() {
+        if !stdin_is_terminal() {
             let state = if previously_approved_hashes.is_empty() {
                 "has not been approved yet"
             } else {
@@ -983,6 +983,10 @@ fn resolve_project_override_target(path: &Path) -> Result<PathBuf> {
         .with_context(|| format!("Failed to resolve {}", candidate.display()))
 }
 
+fn stdin_is_terminal() -> bool {
+    cfg!(not(test)) && std::io::stdin().is_terminal()
+}
+
 fn resolve_secret_fetch_target(path: &Path) -> Result<(PathBuf, PathBuf)> {
     let env_path = if path.is_dir() {
         path.join(".env")
@@ -1051,6 +1055,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tempfile::TempDir;
 
     #[test]
     fn test_default_config() {
@@ -1315,5 +1320,581 @@ vault = "Work"
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("pw-env-{name}-{}-{nonce}", std::process::id()))
+    }
+
+    #[test]
+    fn test_sha256_hex_empty_string() {
+        // SHA256 of empty string is well-known
+        let result = sha256_hex("");
+        assert_eq!(
+            result,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn test_sha256_hex_produces_64_hex_chars() {
+        let result = sha256_hex("hello world");
+        assert_eq!(result.len(), 64);
+        assert!(result.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_expand_path_with_tilde_prefix() {
+        let result = expand_path("~/foo/bar");
+        let s = result.to_string_lossy();
+        assert!(!s.starts_with('~'), "tilde should be expanded");
+        assert!(s.ends_with("foo/bar"));
+    }
+
+    #[test]
+    fn test_expand_path_without_tilde() {
+        let result = expand_path("/absolute/path");
+        assert_eq!(result, PathBuf::from("/absolute/path"));
+    }
+
+    #[test]
+    fn test_expand_path_relative_unchanged() {
+        let result = expand_path("relative/path");
+        assert_eq!(result, PathBuf::from("relative/path"));
+    }
+
+    #[test]
+    fn test_effective_op_uses_project_override() {
+        let config = Config {
+            defaults: Defaults {
+                backend: "op".to_string(),
+                op: OpConfig {
+                    vault: Some("DefaultVault".to_string()),
+                    ..Default::default()
+                },
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![ProjectOverride {
+                path: "/home/user/work".to_string(),
+                op: Some(OpConfig {
+                    vault: Some("WorkVault".to_string()),
+                    ..Default::default()
+                }),
+                ..ProjectOverride::default()
+            }],
+        };
+        let op = config.effective_op(Path::new("/home/user/work/api"));
+        assert_eq!(op.vault.as_deref(), Some("WorkVault"));
+    }
+
+    #[test]
+    fn test_effective_bw_uses_project_override() {
+        let config = Config {
+            defaults: Defaults {
+                backend: "bw".to_string(),
+                bw: BwConfig {
+                    folder: Some("default-folder".to_string()),
+                    ..Default::default()
+                },
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![ProjectOverride {
+                path: "/home/user/work".to_string(),
+                bw: Some(BwConfig {
+                    folder: Some("work-folder".to_string()),
+                    ..Default::default()
+                }),
+                ..ProjectOverride::default()
+            }],
+        };
+        let bw = config.effective_bw(Path::new("/home/user/work/service"));
+        assert_eq!(bw.folder.as_deref(), Some("work-folder"));
+    }
+
+    #[test]
+    fn test_effective_gpg_uses_project_override() {
+        let config = Config {
+            defaults: Defaults {
+                gpg: GpgConfig {
+                    file_pattern: ".env.gpg".to_string(),
+                    recipient: None,
+                },
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![ProjectOverride {
+                path: "/home/user/personal".to_string(),
+                gpg: Some(GpgConfig {
+                    file_pattern: ".secrets.gpg".to_string(),
+                    recipient: Some("me@example.com".to_string()),
+                }),
+                ..ProjectOverride::default()
+            }],
+        };
+        let gpg = config.effective_gpg(Path::new("/home/user/personal/blog"));
+        assert_eq!(gpg.file_pattern, ".secrets.gpg");
+    }
+
+    #[test]
+    fn test_effective_item_from_project() {
+        let config = Config {
+            defaults: Defaults::default(),
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![ProjectOverride {
+                path: "/home/user/work".to_string(),
+                item: Some("project-item".to_string()),
+                ..ProjectOverride::default()
+            }],
+        };
+        assert_eq!(
+            config.effective_item(Path::new("/home/user/work/api")),
+            Some("project-item")
+        );
+    }
+
+    #[test]
+    fn test_effective_item_from_op_config() {
+        let config = Config {
+            defaults: Defaults {
+                backend: "op".to_string(),
+                op: OpConfig {
+                    item: Some("default-op-item".to_string()),
+                    ..Default::default()
+                },
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+        assert_eq!(
+            config.effective_item(Path::new("/any/dir")),
+            Some("default-op-item")
+        );
+    }
+
+    #[test]
+    fn test_effective_item_from_bw_config() {
+        let config = Config {
+            defaults: Defaults {
+                backend: "bw".to_string(),
+                bw: BwConfig {
+                    item: Some("default-bw-item".to_string()),
+                    ..Default::default()
+                },
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+        assert_eq!(
+            config.effective_item(Path::new("/any/dir")),
+            Some("default-bw-item")
+        );
+    }
+
+    #[test]
+    fn test_effective_item_none_when_not_configured() {
+        let config = Config {
+            defaults: Defaults::default(),
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+        assert_eq!(config.effective_item(Path::new("/any/dir")), None);
+    }
+
+    #[test]
+    fn test_config_path_contains_pw_env_and_toml() {
+        let path = Config::config_path();
+        let s = path.to_string_lossy();
+        assert!(s.contains("pw-env"), "path should contain 'pw-env'");
+        assert!(s.ends_with("config.toml"), "path should end with config.toml");
+    }
+
+    #[test]
+    fn test_approved_project_configs_load_from_missing_path_returns_empty() {
+        let test_dir = unique_test_dir("apc-missing");
+        let store_path = test_dir.join("approved-project-configs.json");
+        // File doesn't exist
+        let loaded = ApprovedProjectConfigs::load_from_path(&store_path).unwrap();
+        assert_eq!(loaded.entries().len(), 0);
+    }
+
+    #[test]
+    fn test_approved_secret_fetches_load_from_missing_path_returns_empty() {
+        let test_dir = unique_test_dir("asf-missing");
+        let store_path = test_dir.join("approved-secret-fetches.json");
+        let loaded = ApprovedSecretFetches::load_from_path(&store_path).unwrap();
+        assert_eq!(loaded.entries().len(), 0);
+    }
+
+    #[test]
+    fn test_hash_file_known_content() {
+        let test_dir = unique_test_dir("hash-file");
+        fs::create_dir_all(&test_dir).unwrap();
+        let file_path = test_dir.join("test.txt");
+        fs::write(&file_path, "hello").unwrap();
+        let hash = hash_file(&file_path).unwrap();
+        // SHA256 of "hello"
+        assert_eq!(
+            hash,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_normalize_path_nonexistent_returns_input() {
+        let path = PathBuf::from("/nonexistent/path/that/does/not/exist/12345");
+        let normalized = normalize_path(&path);
+        assert_eq!(normalized, "/nonexistent/path/that/does/not/exist/12345");
+    }
+
+    #[test]
+    fn test_normalize_path_existing_dir() {
+        let test_dir = unique_test_dir("normalize-path");
+        fs::create_dir_all(&test_dir).unwrap();
+        let normalized = normalize_path(&test_dir);
+        assert!(!normalized.is_empty());
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_secret_fetch_is_approved_project_wide() {
+        let test_dir = unique_test_dir("sf-project-wide");
+        fs::create_dir_all(&test_dir).unwrap();
+        let project_dir = test_dir.join("project");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let mut approvals = ApprovedSecretFetches::default();
+        approvals.allow_project_wide(&project_dir);
+
+        assert!(approvals.is_approved(&project_dir, "any-hash-at-all"));
+        assert!(approvals.is_project_wide(&project_dir));
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_secret_fetch_is_approved_by_hash() {
+        let test_dir = unique_test_dir("sf-by-hash");
+        fs::create_dir_all(&test_dir).unwrap();
+        let project_dir = test_dir.join("project");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let mut approvals = ApprovedSecretFetches::default();
+        approvals.approve_hash(&project_dir, "abc123".to_string());
+
+        assert!(approvals.is_approved(&project_dir, "abc123"));
+        assert!(!approvals.is_approved(&project_dir, "different-hash"));
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_reviewed_migrations_remember_and_fingerprints() {
+        let test_dir = unique_test_dir("rm-remember");
+        fs::create_dir_all(&test_dir).unwrap();
+        let env_path = test_dir.join(".env");
+        fs::write(&env_path, "API_KEY=value\n").unwrap();
+
+        let mut reviewed = ReviewedMigrations::default();
+        reviewed.remember(&env_path, ["fp-a".to_string(), "fp-b".to_string()]);
+
+        let fps = reviewed.fingerprints(&env_path);
+        assert!(fps.contains("fp-a"));
+        assert!(fps.contains("fp-b"));
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_reviewed_migrations_save_and_load() {
+        let test_dir = unique_test_dir("rm-save-load");
+        fs::create_dir_all(&test_dir).unwrap();
+        let env_path = test_dir.join(".env");
+        let store_path = test_dir.join("reviewed.json");
+        fs::write(&env_path, "API_KEY=value\n").unwrap();
+
+        let mut reviewed = ReviewedMigrations::default();
+        reviewed.remember(&env_path, ["fp-1".to_string()]);
+        reviewed.save_to_path(&store_path).unwrap();
+
+        let loaded = ReviewedMigrations::load_from_path(&store_path).unwrap();
+        let fps = loaded.fingerprints(&env_path);
+        assert!(fps.contains("fp-1"));
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_config_approval_store_path_does_not_panic() {
+        let _ = Config::approval_store_path();
+    }
+
+    #[test]
+    fn test_config_secret_fetch_approval_store_path_does_not_panic() {
+        let _ = Config::secret_fetch_approval_store_path();
+    }
+
+    #[test]
+    fn test_config_approved_project_configs_returns_result() {
+        let result = Config::approved_project_configs();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_config_approved_secret_fetches_returns_result() {
+        let result = Config::approved_secret_fetches();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_config_project_override_approval_status_with_temp_file() {
+        let test_dir = unique_test_dir("proj-override-status");
+        fs::create_dir_all(&test_dir).unwrap();
+        let override_path = test_dir.join(PROJECT_OVERRIDE_FILE_NAME);
+        fs::write(&override_path, "backend = \"op\"\n").unwrap();
+
+        let result = Config::project_override_approval_status(&override_path);
+        assert!(result.is_ok());
+        let status = result.unwrap();
+        assert!(status.current_hash.is_some());
+        assert!(status.approved_hash.is_none()); // not yet approved
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_config_secret_fetch_approval_status_with_temp_env() {
+        let test_dir = unique_test_dir("sf-status");
+        fs::create_dir_all(&test_dir).unwrap();
+        let env_path = test_dir.join(".env");
+        fs::write(&env_path, "API_KEY=\n").unwrap();
+
+        let result = Config::secret_fetch_approval_status(&env_path);
+        assert!(result.is_ok());
+        let status = result.unwrap();
+        assert!(status.current_env_hash.is_some());
+        assert!(!status.project_wide);
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_ensure_secret_fetch_approved_bails_when_non_interactive() {
+        let test_dir = unique_test_dir("ensure-sf-approved");
+        fs::create_dir_all(&test_dir).unwrap();
+        let env_path = test_dir.join(".env");
+        fs::write(&env_path, "API_KEY=op://vault/item/field\n").unwrap();
+
+        // In tests, stdin is not a terminal, so this should bail
+        let result = Config::ensure_secret_fetch_approved(&env_path);
+        assert!(result.is_err());
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_revoke_project_override_approval_returns_false_when_not_approved() {
+        let test_dir = unique_test_dir("revoke-proj-override");
+        fs::create_dir_all(&test_dir).unwrap();
+        let override_path = test_dir.join(PROJECT_OVERRIDE_FILE_NAME);
+        fs::write(&override_path, "backend = \"bw\"\n").unwrap();
+
+        let result = Config::revoke_project_override_approval(&override_path);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), false); // nothing to revoke
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_revoke_secret_fetch_approval_returns_false_when_not_approved() {
+        let test_dir = unique_test_dir("revoke-sf");
+        fs::create_dir_all(&test_dir).unwrap();
+        let env_path = test_dir.join(".env");
+        fs::write(&env_path, "DB_URL=\n").unwrap();
+
+        let result = Config::revoke_secret_fetch_approval(&env_path);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), false);
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_config_load_for_dir_with_no_override_returns_config() {
+        let test_dir = unique_test_dir("load-for-dir");
+        fs::create_dir_all(&test_dir).unwrap();
+
+        // Dir with no .pw-env.toml override
+        let result = Config::load_for_dir(&test_dir);
+        assert!(result.is_ok());
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_find_git_root_in_config_module() {
+        let test_dir = unique_test_dir("find-git-root-config");
+        let repo_dir = test_dir.join("repo");
+        let subdir = repo_dir.join("src");
+
+        fs::create_dir_all(repo_dir.join(".git")).unwrap();
+        fs::create_dir_all(&subdir).unwrap();
+
+        let result = find_git_root(&subdir);
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().file_name().unwrap(), "repo");
+    }
+
+    #[test]
+    fn test_resolve_secret_fetch_target_with_direct_env_file() {
+        let test_dir = unique_test_dir("sf-target-direct");
+        fs::create_dir_all(&test_dir).unwrap();
+        let env_path = test_dir.join(".env");
+        fs::write(&env_path, "KEY=value\n").unwrap();
+
+        let result = resolve_secret_fetch_target(&env_path);
+        assert!(result.is_ok());
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_resolve_secret_fetch_target_with_directory() {
+        let test_dir = unique_test_dir("sf-target-dir");
+        fs::create_dir_all(&test_dir).unwrap();
+        let env_path = test_dir.join(".env");
+        fs::write(&env_path, "KEY=value\n").unwrap();
+
+        // Pass the directory instead of the file
+        let result = resolve_secret_fetch_target(&test_dir);
+        assert!(result.is_ok());
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_resolve_project_override_target_with_directory() {
+        let test_dir = unique_test_dir("po-target-dir");
+        fs::create_dir_all(&test_dir).unwrap();
+        let override_path = test_dir.join(PROJECT_OVERRIDE_FILE_NAME);
+        fs::write(&override_path, "backend = \"op\"\n").unwrap();
+
+        let result = resolve_project_override_target(&test_dir);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().file_name().unwrap(), PROJECT_OVERRIDE_FILE_NAME);
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_reviewed_migrations_load_from_missing_path_returns_empty() {
+        let test_dir = unique_test_dir("rm-missing");
+        let store_path = test_dir.join("reviewed-migrations.json");
+        let loaded = ReviewedMigrations::load_from_path(&store_path).unwrap();
+        assert!(loaded.fingerprints(&store_path).is_empty());
+    }
+
+    #[test]
+    fn test_approved_project_configs_load_returns_invalid_json_error() {
+        let test_dir = unique_test_dir("apc-bad-json");
+        fs::create_dir_all(&test_dir).unwrap();
+        let store_path = test_dir.join("bad.json");
+        fs::write(&store_path, "not valid json").unwrap();
+        let result = ApprovedProjectConfigs::load_from_path(&store_path);
+        assert!(result.is_err());
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_approved_secret_fetches_load_returns_invalid_json_error() {
+        let test_dir = unique_test_dir("asf-bad-json");
+        fs::create_dir_all(&test_dir).unwrap();
+        let store_path = test_dir.join("bad.json");
+        fs::write(&store_path, "not valid json").unwrap();
+        let result = ApprovedSecretFetches::load_from_path(&store_path);
+        assert!(result.is_err());
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn effective_item_with_bw_backend_returns_bw_item() {
+        let config = Config {
+            defaults: Defaults {
+                backend: "bw".to_string(),
+                bw: BwConfig {
+                    item: Some("my-bw-item".to_string()),
+                    ..Default::default()
+                },
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+        assert_eq!(config.effective_item(std::path::Path::new("/tmp")), Some("my-bw-item"));
+    }
+
+    #[test]
+    fn effective_item_with_no_backend_item_returns_none() {
+        let config = Config {
+            defaults: Defaults {
+                backend: "gpg".to_string(),
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+        assert_eq!(config.effective_item(std::path::Path::new("/tmp")), None);
+    }
+
+    #[test]
+    fn effective_commands_with_matching_project_returns_commands() {
+        let temp_dir = TempDir::new().unwrap();
+        let canonical_path = temp_dir.path().canonicalize().unwrap();
+        let config = Config {
+            defaults: Defaults::default(),
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![ProjectOverride {
+                path: canonical_path.to_string_lossy().into_owned(),
+                commands: vec!["echo".to_string(), "cat".to_string()],
+                backend: None,
+                op: None,
+                bw: None,
+                gpg: None,
+                item: None,
+            }],
+        };
+        let cmds = config.effective_commands(&canonical_path);
+        assert_eq!(cmds, &["echo", "cat"]);
+    }
+
+    #[test]
+    fn effective_commands_without_matching_project_returns_empty() {
+        let config = Config {
+            defaults: Defaults::default(),
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+        let cmds = config.effective_commands(std::path::Path::new("/tmp"));
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn reviewed_migration_entry_fingerprints_returns_empty_for_new_path() {
+        let test_dir = unique_test_dir("rmef-new");
+        let env_path = std::path::Path::new(&test_dir).join(".env");
+        // Should return empty set since no fingerprints have been stored
+        let result = Config::reviewed_migration_entry_fingerprints(&env_path);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
     }
 }

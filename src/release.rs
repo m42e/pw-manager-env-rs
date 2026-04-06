@@ -39,6 +39,7 @@ struct ReleaseInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum ArchiveFormat {
     TarGz,
     #[cfg(target_os = "windows")]
@@ -538,5 +539,233 @@ mod tests {
     #[test]
     fn github_release_owner_constant_matches_repo_url() {
         assert!(RELEASE_API_URL.contains("/m42e/"));
+    }
+
+    #[test]
+    fn release_download_url_has_expected_format() {
+        let url =
+            release_download_url("v1.2.3", "pw-env-v1.2.3-x86_64-apple-darwin.tar.gz");
+        assert!(url.contains("github.com"));
+        assert!(url.contains("m42e/pw-env"));
+        assert!(url.contains("v1.2.3"));
+        assert!(url.contains("pw-env-v1.2.3-x86_64-apple-darwin.tar.gz"));
+    }
+
+    #[test]
+    fn is_newer_release_returns_false_for_same_version() {
+        let current = env!("CARGO_PKG_VERSION");
+        let result = is_newer_release(current).unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn is_newer_release_returns_true_for_higher_version() {
+        let result = is_newer_release("999.0.0").unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn is_newer_release_returns_false_for_lower_version() {
+        // Current version is 0.2.10, so 0.0.1 should be lower
+        let result = is_newer_release("0.0.1").unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn is_newer_release_rejects_invalid_version() {
+        let result = is_newer_release("not-a-version");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn archive_format_extension_tar_gz() {
+        assert_eq!(ArchiveFormat::TarGz.extension(), "tar.gz");
+    }
+
+    #[test]
+    fn release_check_state_is_due_with_zero_interval() {
+        let state = ReleaseCheckState {
+            last_checked_at: Some(1_000),
+            last_notified_version: None,
+        };
+        // interval of 0 seconds means always due
+        assert!(state.is_due(1_000, Duration::from_secs(0)));
+    }
+
+    #[test]
+    fn release_check_state_load_returns_default_for_missing_path() {
+        let path = PathBuf::from("/nonexistent/path/that/does/not/exist/release-check.json");
+        let state = ReleaseCheckState::load(&path).unwrap();
+        assert!(state.last_checked_at.is_none());
+        assert!(state.last_notified_version.is_none());
+    }
+
+    #[test]
+    fn release_check_state_save_and_load_round_trips() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("state.json");
+
+        let state = ReleaseCheckState {
+            last_checked_at: Some(12345),
+            last_notified_version: Some("1.0.0".to_string()),
+        };
+        state.save(&path).unwrap();
+
+        let loaded = ReleaseCheckState::load(&path).unwrap();
+        assert_eq!(loaded.last_checked_at, Some(12345));
+        assert_eq!(loaded.last_notified_version.as_deref(), Some("1.0.0"));
+    }
+
+    #[test]
+    fn release_check_state_load_returns_error_for_invalid_json() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("bad-state.json");
+        std::fs::write(&path, "not valid json { ").unwrap();
+
+        let result = ReleaseCheckState::load(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn now_unix_timestamp_is_reasonable() {
+        let ts = now_unix_timestamp();
+        // After 2024-01-01
+        assert!(ts > 1_700_000_000);
+        // Before 2100-01-01
+        assert!(ts < 4_100_000_000);
+    }
+
+    #[test]
+    fn resolve_release_with_explicit_version_no_network() {
+        // Passing an explicit version should not require network access
+        let result = resolve_release(Some("1.2.3"));
+        let resolved = result.unwrap();
+        assert_eq!(resolved.version, "1.2.3");
+        assert_eq!(resolved.tag, "v1.2.3");
+    }
+
+    #[test]
+    fn detect_release_asset_returns_asset_for_current_platform() {
+        let result = detect_release_asset();
+        assert!(result.is_ok(), "platform should be supported");
+        let asset = result.unwrap();
+        assert!(!asset.target.is_empty());
+        assert!(!asset.binary_name.is_empty());
+    }
+
+    #[test]
+    fn maybe_check_for_update_returns_ok_immediately_when_updates_disabled() {
+        let config = crate::config::Config {
+            defaults: crate::config::Defaults::default(),
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig {
+                enabled: false,
+                check_interval_hours: 24,
+            },
+            projects: vec![],
+        };
+        let result = maybe_check_for_update(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn maybe_check_for_update_returns_ok_when_state_is_not_due() {
+        // Write a "just checked" state to the actual state path so is_due() returns false
+        // and no network call is made.
+        let Some(state_path) = state_path() else {
+            return; // platform has no state dir; skip
+        };
+
+        let original = if state_path.exists() {
+            std::fs::read_to_string(&state_path).ok()
+        } else {
+            None
+        };
+
+        let fresh = ReleaseCheckState {
+            last_checked_at: Some(now_unix_timestamp()),
+            last_notified_version: None,
+        };
+        if fresh.save(&state_path).is_err() {
+            return; // can't write state; skip
+        }
+
+        let config = crate::config::Config {
+            defaults: crate::config::Defaults::default(),
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig {
+                enabled: true,
+                check_interval_hours: 24,
+            },
+            projects: vec![],
+        };
+        let result = maybe_check_for_update(&config);
+
+        // Restore the original state
+        match original {
+            Some(content) => { let _ = std::fs::write(&state_path, content); }
+            None => { let _ = std::fs::remove_file(&state_path); }
+        }
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn http_client_builds_successfully_with_short_timeout() {
+        let result = http_client(Duration::from_secs(1));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn state_path_does_not_panic() {
+        let _path = state_path(); // May be Some or None depending on platform; must not panic
+    }
+
+    #[test]
+    fn release_check_state_is_not_due_when_checked_just_now() {
+        let now = now_unix_timestamp();
+        let state = ReleaseCheckState {
+            last_checked_at: Some(now),
+            last_notified_version: None,
+        };
+        let interval = Duration::from_secs(3600);
+        assert!(!state.is_due(now, interval));
+    }
+
+    #[test]
+    fn release_check_state_save_creates_parent_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let nested = temp_dir.path().join("a/b/c/state.json");
+        let state = ReleaseCheckState {
+            last_checked_at: Some(99),
+            last_notified_version: Some("0.1.0".to_string()),
+        };
+        state.save(&nested).unwrap();
+        assert!(nested.exists());
+    }
+
+    #[test]
+    fn normalize_tag_handles_whitespace() {
+        assert_eq!(normalize_tag("  1.2.3  "), "v1.2.3");
+        assert_eq!(normalize_tag("  v1.2.3  "), "v1.2.3");
+    }
+
+    #[test]
+    fn resolve_release_with_explicit_v_prefix() {
+        let result = resolve_release(Some("v1.5.0")).unwrap();
+        assert_eq!(result.version, "1.5.0");
+        assert_eq!(result.tag, "v1.5.0");
+    }
+
+    #[test]
+    fn release_archive_name_uses_extension_from_asset() {
+        let asset = ReleaseAsset {
+            target: "x86_64-unknown-linux-gnu",
+            archive_format: ArchiveFormat::TarGz,
+            binary_name: "pw-env",
+        };
+        let name = release_archive_name("v0.2.0", &asset);
+        assert!(name.ends_with(".tar.gz"));
+        assert!(name.contains("x86_64-unknown-linux-gnu"));
     }
 }
