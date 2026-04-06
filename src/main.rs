@@ -8,9 +8,19 @@ mod resolve;
 mod shell;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
+use glob::Pattern;
+use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::io::IsTerminal;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command as ProcessCommand;
 use tracing::{debug, error, info};
 
 #[derive(Parser)]
@@ -33,6 +43,15 @@ enum Commands {
     Init {
         /// Shell to generate hook for: bash, zsh, or fish
         shell: String,
+    },
+    /// Execute a command with resolved environment variables only in the child process
+    Exec {
+        /// Directory to look for .env file in (defaults to current directory)
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Command to execute with transient environment variables
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
     },
     /// Export resolved environment variables (for shell eval)
     Export {
@@ -70,6 +89,19 @@ enum Commands {
     },
     /// Print the default configuration file template
     ConfigTemplate,
+    /// Generate shell completion script
+    Completions {
+        /// Shell to generate completions for
+        shell: Shell,
+    },
+    #[command(hide = true)]
+    Hook {
+        /// Directory to inspect for shell integration state (defaults to current directory)
+        dir: Option<PathBuf>,
+        /// Shell syntax to use: bash, zsh, or fish
+        #[arg(long, default_value = "bash")]
+        shell: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -144,6 +176,56 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
             Ok(())
         }
 
+        Commands::Exec { dir, command } => {
+            let dir = resolve_dir(dir)?;
+            let mut command_iter = command.into_iter();
+            let program = command_iter
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("No command provided"))?;
+            let args = command_iter.collect::<Vec<_>>();
+
+            let mut child = ProcessCommand::new(&program);
+            child.args(&args);
+
+            if let Some(env_path) = env_file::EnvFile::find(&dir) {
+                let config = config::Config::load_for_dir(&dir)?;
+                let env_file = env_file::EnvFile::parse(&env_path)?;
+                emit_plaintext_secret_warning(&env_file)?;
+
+                let managed_keys = env_file
+                    .resolvable_entries()
+                    .into_iter()
+                    .map(|entry| entry.key.clone())
+                    .collect::<Vec<_>>();
+                let resolved = resolve::resolve_env_file(&env_file, &config, &dir)?;
+
+                for key in &managed_keys {
+                    child.env_remove(key);
+                }
+                child.envs(&resolved);
+
+                info!(
+                    "Prepared transient environment with {} variables from {}",
+                    resolved.len(),
+                    env_path.display()
+                );
+            }
+
+            #[cfg(unix)]
+            {
+                let error = child.exec();
+                Err(error).with_context(|| format!("Failed to execute {program}"))
+            }
+
+            #[cfg(not(unix))]
+            {
+                let status = child
+                    .status()
+                    .with_context(|| format!("Failed to execute {program}"))?;
+                std::process::exit(status.code().unwrap_or(1));
+            }
+        }
+
         Commands::Export { dir, shell } => {
             let dir = resolve_dir(dir)?;
             let config = config::Config::load_for_dir(&dir)?;
@@ -161,14 +243,7 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
             };
 
             let env_file = env_file::EnvFile::parse(&env_path)?;
-
-            let likely_secrets = pending_migration_entries(&env_file)?;
-            if !likely_secrets.is_empty() {
-                eprintln!(
-                    "pw-env: warning: likely plaintext secrets found in .env: {}. Run `pw-env migrate` to secure them.",
-                    summarize_entry_keys(&likely_secrets)
-                );
-            }
+            emit_plaintext_secret_warning(&env_file)?;
 
             let resolved = resolve::resolve_env_file(&env_file, &config, &dir)?;
 
@@ -197,6 +272,20 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
                 resolved.len(),
                 env_path.display()
             );
+            Ok(())
+        }
+
+        Commands::Hook { dir, shell } => {
+            let dir = resolve_dir(dir)?;
+            let config = config::Config::load_for_dir(&dir)?;
+            let shell_syntax = match shell.as_str() {
+                "fish" => output::ShellSyntax::Fish,
+                _ => output::ShellSyntax::Posix,
+            };
+
+            let hook_output = build_hook_output(&dir, shell_syntax, &config, std::env::var_os("PATH"))?;
+            print!("{hook_output}");
+
             Ok(())
         }
 
@@ -297,11 +386,19 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
             print!("{}", config_template());
             Ok(())
         }
+
+        Commands::Completions { shell } => {
+            generate(shell, &mut Cli::command(), "pw-env", &mut std::io::stdout());
+            Ok(())
+        }
     }
 }
 
 fn maybe_check_for_release_update(command: &Commands, config: &config::Config) {
-    if matches!(command, Commands::Export { .. } | Commands::Update { .. }) {
+    if matches!(
+        command,
+        Commands::Exec { .. } | Commands::Export { .. } | Commands::Hook { .. } | Commands::Update { .. }
+    ) {
         return;
     }
 
@@ -334,6 +431,18 @@ fn summarize_entry_keys(entries: &[&env_file::EnvEntry]) -> String {
     }
 }
 
+fn emit_plaintext_secret_warning(env_file: &env_file::EnvFile) -> Result<()> {
+    let likely_secrets = pending_migration_entries(env_file)?;
+    if !likely_secrets.is_empty() {
+        eprintln!(
+            "pw-env: warning: likely plaintext secrets found in .env: {}. Run `pw-env migrate` to secure them.",
+            summarize_entry_keys(&likely_secrets)
+        );
+    }
+
+    Ok(())
+}
+
 fn pending_migration_entries<'a>(
     env_file: &'a env_file::EnvFile,
 ) -> Result<Vec<&'a env_file::EnvEntry>> {
@@ -354,6 +463,143 @@ fn resolve_dir(dir: Option<PathBuf>) -> Result<PathBuf> {
             dir.canonicalize()
                 .with_context(|| format!("Directory not found: {}", dir.display()))
         }
+    }
+}
+
+fn build_hook_output(
+    dir: &Path,
+    shell_syntax: output::ShellSyntax,
+    config: &config::Config,
+    path_var: Option<std::ffi::OsString>,
+) -> Result<String> {
+    let env_path = match env_file::EnvFile::find(dir) {
+        Some(path) => path,
+        None => {
+            debug!("No .env file in {}", dir.display());
+            return Ok(String::new());
+        }
+    };
+
+    let command_patterns = config.effective_commands(dir);
+    if !command_patterns.is_empty() {
+        let wrapped_commands = resolve_wrapped_commands(command_patterns, path_var);
+        info!(
+            "Configured {} transient command wrappers from {} pattern(s) for {}",
+            wrapped_commands.len(),
+            command_patterns.len(),
+            dir.display()
+        );
+        return Ok(output::format_command_wrappers(&wrapped_commands, shell_syntax));
+    }
+
+    let env_file = env_file::EnvFile::parse(&env_path)?;
+    emit_plaintext_secret_warning(&env_file)?;
+    let resolved = resolve::resolve_env_file(&env_file, config, dir)?;
+
+    if resolved.is_empty() {
+        debug!("No variables resolved");
+        return Ok(String::new());
+    }
+
+    let mut output_text = output::format_exports(&resolved, shell_syntax);
+    let keys: Vec<String> = resolved.keys().cloned().collect();
+    let tracking = output::format_key_tracking(&keys);
+    match shell_syntax {
+        output::ShellSyntax::Posix => {
+            output_text.push_str(&format!(
+                "__pw_env_previous_keys=\"{tracking}\"\n__pw_env_previous_commands=\"\"\n"
+            ));
+        }
+        output::ShellSyntax::Fish => {
+            output_text.push_str(&format!(
+                "set -g __pw_env_previous_keys \"{tracking}\"\nset -g __pw_env_previous_commands\n"
+            ));
+        }
+    }
+
+    Ok(output_text)
+}
+
+fn resolve_wrapped_commands(
+    command_patterns: &[String],
+    path_var: Option<std::ffi::OsString>,
+) -> Vec<String> {
+    let executables = list_path_executables(path_var.as_deref());
+    let mut wrapped_commands = BTreeSet::new();
+
+    for pattern in command_patterns {
+        if !contains_glob_meta(pattern) {
+            if output::is_safe_command_name(pattern) {
+                wrapped_commands.insert(pattern.clone());
+            }
+            continue;
+        }
+
+        let Ok(glob_pattern) = Pattern::new(pattern) else {
+            continue;
+        };
+
+        for executable in &executables {
+            if glob_pattern.matches(executable) {
+                wrapped_commands.insert(executable.clone());
+            }
+        }
+    }
+
+    wrapped_commands.into_iter().collect()
+}
+
+fn list_path_executables(path_var: Option<&OsStr>) -> BTreeSet<String> {
+    let Some(path_var) = path_var else {
+        return BTreeSet::new();
+    };
+
+    let mut executables = BTreeSet::new();
+    for directory in std::env::split_paths(path_var) {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !is_executable_file(&path) {
+                continue;
+            }
+
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+
+            if output::is_safe_command_name(name) {
+                executables.insert(name.to_string());
+            }
+        }
+    }
+
+    executables
+}
+
+fn contains_glob_meta(pattern: &str) -> bool {
+    pattern.contains('*') || pattern.contains('?') || pattern.contains('[')
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
     }
 }
 
@@ -644,6 +890,7 @@ check_interval_hours = 24
 # path = "/home/user/work/api-server"
 # backend = "op"
 # item = "api-server-env"
+# commands = ["cargo", "npm"]
 #
 # [projects.op]
 # vault = "Work"
@@ -666,6 +913,7 @@ check_interval_hours = 24
 #
 # backend = "op"
 # item = "api-server-env"
+# commands = ["cargo", "npm"]
 #
 # [op]
 # vault = "Work"
@@ -718,4 +966,87 @@ fn setup_logging(config: &config::Config) {
         .with_writer(std::io::stderr)
         .with_target(false)
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn resolve_wrapped_commands_keeps_exact_safe_names() {
+        let commands = resolve_wrapped_commands(&["cargo".to_string()], None);
+        assert_eq!(commands, vec!["cargo".to_string()]);
+    }
+
+    #[test]
+    fn resolve_wrapped_commands_expands_globs_from_path() {
+        let temp_dir = TempDir::new().unwrap();
+        create_executable(temp_dir.path().join("cargo"));
+        create_executable(temp_dir.path().join("cargo-clippy"));
+        create_executable(temp_dir.path().join("npm"));
+
+        let path_var = std::env::join_paths([temp_dir.path()]).unwrap();
+        let commands = resolve_wrapped_commands(&["cargo*".to_string()], Some(path_var));
+
+        assert_eq!(commands, vec!["cargo".to_string(), "cargo-clippy".to_string()]);
+    }
+
+    #[test]
+    fn resolve_wrapped_commands_deduplicates_matches() {
+        let temp_dir = TempDir::new().unwrap();
+        create_executable(temp_dir.path().join("cargo"));
+
+        let path_var = std::env::join_paths([temp_dir.path()]).unwrap();
+        let commands = resolve_wrapped_commands(
+            &["cargo".to_string(), "cargo*".to_string()],
+            Some(path_var),
+        );
+
+        assert_eq!(commands, vec!["cargo".to_string()]);
+    }
+
+    #[test]
+    fn build_hook_output_uses_wrappers_for_command_patterns() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(temp_dir.path().join(".env"), "API_KEY=\n").unwrap();
+        let canonical_dir = temp_dir.path().canonicalize().unwrap();
+
+        let bin_dir = TempDir::new().unwrap();
+        create_executable(bin_dir.path().join("cargo"));
+        create_executable(bin_dir.path().join("cargo-watch"));
+
+        let path_var = std::env::join_paths([bin_dir.path()]).unwrap();
+
+        let output = build_hook_output(
+            &canonical_dir,
+            output::ShellSyntax::Posix,
+            &config::Config {
+                defaults: config::Defaults::default(),
+                log: config::LogConfig::default(),
+                updates: config::UpdateConfig::default(),
+                projects: vec![config::ProjectOverride {
+                    path: canonical_dir.to_string_lossy().into_owned(),
+                    commands: vec!["cargo*".to_string()],
+                    ..config::ProjectOverride::default()
+                }],
+            },
+            Some(path_var),
+        )
+        .unwrap();
+
+        assert!(output.contains("__pw_env_define_command_wrapper cargo\n"));
+        assert!(output.contains("__pw_env_define_command_wrapper cargo-watch\n"));
+        assert!(!output.contains("export API_KEY"));
+    }
+
+    fn create_executable(path: PathBuf) {
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&path, permissions).unwrap();
+        }
+    }
 }

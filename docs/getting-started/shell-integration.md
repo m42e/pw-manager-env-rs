@@ -2,6 +2,11 @@
 
 pw-env supports one-off exports and persistent shell hooks.
 
+The persistent hook has two modes:
+
+1. Default mode exports resolved secrets for the whole directory when you enter it.
+2. Command-scoped mode installs transient wrappers for configured commands and keeps secrets out of the parent shell environment.
+
 ## One-off loading
 
 ::: code-group
@@ -46,12 +51,24 @@ Add the same command to `~/.bashrc`, `~/.zshrc`, or `~/.config/fish/config.fish`
 
 ## What the generated hook does
 
-1. Unsets the keys exported by the previous directory.
+1. Clears any pw-env state from the previous directory.
 2. Checks whether the new working directory contains a `.env` file.
-3. Runs `pw-env export` for that directory.
-4. Evaluates the output only when pw-env returned export statements.
+3. Loads shell state for that directory.
+4. Either exports resolved variables for the directory, or installs transient wrappers for configured commands.
 
-Warnings from `pw-env export` are written to stderr, so they remain visible when the hook is running automatically.
+Warnings from pw-env are written to stderr, so they remain visible when the hook is running automatically.
+
+## Command-scoped mode
+
+Add a `commands` list to a matching `[[projects]]` entry or to `.pw-env.toml`:
+
+```toml
+commands = ["cargo*", "npm", "terraform"]
+```
+
+In that mode, pw-env does not export secrets into the parent shell when you enter the directory. Instead it resolves the configured command names and glob patterns against executable names on `PATH`, installs wrappers for the matches, and runs those commands through `pw-env exec` so the resolved secrets exist only in the child process.
+
+Command-scoped mode matches exact command names and shell-style glob patterns against executable names.
 
 ## Per-shell behavior
 
@@ -68,6 +85,7 @@ When automatic loading does not look right, verify the project directly before c
 ```console
 $ pw-env load .
 $ pw-env export . --shell bash
+$ pw-env exec --dir . -- env | grep YOUR_KEY
 ```
 
 If you expect a backend lookup but `pw-env export` prints nothing, check the `.env` file classification rules in [Resolution model](../concepts/resolution-model.md).

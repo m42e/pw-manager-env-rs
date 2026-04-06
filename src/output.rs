@@ -45,6 +45,64 @@ pub fn format_key_tracking(keys: &[String]) -> String {
         .join(" ")
 }
 
+/// Format configured command wrappers for the shell hook.
+pub fn format_command_wrappers(commands: &[String], shell: ShellSyntax) -> String {
+    let valid_commands = commands
+        .iter()
+        .filter(|command| is_safe_command_name(command))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let mut output = String::new();
+    for command in &valid_commands {
+        match shell {
+            ShellSyntax::Posix => {
+                output.push_str(&format!(
+                    "__pw_env_define_command_wrapper {command}\n"
+                ));
+            }
+            ShellSyntax::Fish => {
+                output.push_str(&format!(
+                    "__pw_env_define_command_wrapper {command}\n"
+                ));
+            }
+        }
+    }
+
+    match shell {
+        ShellSyntax::Posix => {
+            output.push_str("__pw_env_previous_keys=\"\"\n");
+            output.push_str(&format!(
+                "__pw_env_previous_commands=\"{}\"\n",
+                format_command_tracking(&valid_commands)
+            ));
+        }
+        ShellSyntax::Fish => {
+            output.push_str("set -g __pw_env_previous_keys \"\"\n");
+            if valid_commands.is_empty() {
+                output.push_str("set -g __pw_env_previous_commands\n");
+            } else {
+                output.push_str(&format!(
+                    "set -g __pw_env_previous_commands {}\n",
+                    valid_commands.join(" ")
+                ));
+            }
+        }
+    }
+
+    output
+}
+
+/// Format the list of wrapped commands as a space-separated string for tracking.
+pub fn format_command_tracking(commands: &[String]) -> String {
+    commands
+        .iter()
+        .filter(|command| is_safe_command_name(command))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum ShellSyntax {
     Posix, // bash, zsh
@@ -70,6 +128,17 @@ fn is_valid_env_key(key: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Validate that a configured command name is safe to wrap in shell aliases/functions.
+pub fn is_safe_command_name(command: &str) -> bool {
+    if command.is_empty() {
+        return false;
+    }
+
+    command.chars().all(|ch| {
+        ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':')
+    })
 }
 
 #[cfg(test)]
@@ -148,5 +217,34 @@ mod tests {
         let output = format_exports(&vars, ShellSyntax::Posix);
         assert!(output.contains("GOOD_KEY"));
         assert!(!output.contains("BAD;KEY"));
+    }
+
+    #[test]
+    fn test_safe_command_name() {
+        assert!(is_safe_command_name("cargo"));
+        assert!(is_safe_command_name("docker-compose"));
+        assert!(is_safe_command_name("npm"));
+        assert!(!is_safe_command_name("cargo test"));
+        assert!(!is_safe_command_name("cargo;rm"));
+    }
+
+    #[test]
+    fn test_format_command_wrappers_posix() {
+        let output = format_command_wrappers(
+            &["cargo".to_string(), "npm".to_string()],
+            ShellSyntax::Posix,
+        );
+
+        assert!(output.contains("__pw_env_define_command_wrapper cargo\n"));
+        assert!(output.contains("__pw_env_define_command_wrapper npm\n"));
+        assert!(output.contains("__pw_env_previous_commands=\"cargo npm\"\n"));
+    }
+
+    #[test]
+    fn test_format_command_wrappers_fish() {
+        let output = format_command_wrappers(&["cargo".to_string()], ShellSyntax::Fish);
+
+        assert!(output.contains("__pw_env_define_command_wrapper cargo\n"));
+        assert!(output.contains("set -g __pw_env_previous_commands cargo\n"));
     }
 }

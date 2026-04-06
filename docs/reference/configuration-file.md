@@ -54,6 +54,7 @@ check_interval_hours = 24
 # path = "/home/user/work/api-server"
 # backend = "op"
 # item = "api-server-env"
+# commands = ["cargo", "npm"]
 #
 # [projects.op]
 # vault = "Work"
@@ -77,7 +78,7 @@ check_interval_hours = 24
 | `[defaults.gpg]` | `file_pattern`, `recipient` | GPG file matching and encryption settings |
 | `[log]` | `level`, `file` | Logging configuration and audit-log destination |
 | `[updates]` | `enabled`, `check_interval_hours` | Automatic GitHub release checks |
-| `[[projects]]` | `path`, `backend`, `item` | Per-path overrides; most specific path prefix wins |
+| `[[projects]]` | `path`, `backend`, `item`, `commands` | Per-path overrides; most specific path prefix wins |
 | `[projects.op]`, `[projects.bw]`, `[projects.gpg]` | backend-specific keys | Extra settings for the most recent `[[projects]]` block |
 
 ## Valid backend values
@@ -91,6 +92,7 @@ For a repository-specific override, create `.pw-env.toml` in the project root or
 ```toml [.pw-env.toml]
 backend = "op"
 item = "api-server-env"
+commands = ["cargo", "npm"]
 
 [op]
 vault = "Work"
@@ -99,3 +101,19 @@ vault = "Work"
 `.pw-env.toml` uses the same backend-specific keys as the global config, but it does not use `[[projects]]` because the file itself already scopes the override to the current project.
 
 pw-env loads the local override only after the current file contents are approved.
+
+## Command-scoped shell integration
+
+Set `commands` on a project entry or in `.pw-env.toml` to opt that project into transient command wrappers.
+
+```toml
+[[projects]]
+path = "/home/user/work/api-server"
+backend = "op"
+item = "api-server-env"
+commands = ["cargo", "npm", "terraform"]
+```
+
+When `commands` is set, the generated shell hook stops exporting resolved secrets into the parent shell for that project. Instead it installs wrappers for the listed command names, and those wrappers run the command through `pw-env exec`.
+
+`commands` accepts exact command names and shell-style glob patterns that are matched against executable names on `PATH`. Values must still resolve to safe shell command tokens such as `cargo`, `npm`, `docker-compose`, or patterns such as `cargo*`.

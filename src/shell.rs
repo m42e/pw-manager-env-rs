@@ -15,9 +15,10 @@ fn generate_bash_hook() -> String {
 # Add to ~/.bashrc: eval "$(pw-env init bash)"
 
 __pw_env_previous_keys=""
+__pw_env_previous_commands=""
+__pw_env_saved_aliases=""
 
-__pw_env_hook() {
-    # Unset previously exported variables
+__pw_env_clear_state() {
     if [ -n "$__pw_env_previous_keys" ]; then
         for key in $__pw_env_previous_keys; do
             unset "$key"
@@ -25,10 +26,40 @@ __pw_env_hook() {
         __pw_env_previous_keys=""
     fi
 
-    # Check if there's a .env file in the current directory
+    if [ -n "$__pw_env_previous_commands" ]; then
+        for cmd in $__pw_env_previous_commands; do
+            if alias "$cmd" >/dev/null 2>&1; then
+                unalias "$cmd"
+            fi
+        done
+        __pw_env_previous_commands=""
+    fi
+
+    if [ -n "$__pw_env_saved_aliases" ]; then
+        eval "$__pw_env_saved_aliases"
+        __pw_env_saved_aliases=""
+    fi
+}
+
+__pw_env_define_command_wrapper() {
+    local cmd="$1"
+    local existing
+
+    if alias "$cmd" >/dev/null 2>&1; then
+        existing="$(alias "$cmd")"
+        __pw_env_saved_aliases="${__pw_env_saved_aliases}${existing}
+"
+    fi
+
+    alias "$cmd"="pw-env exec --dir \"\$PWD\" -- $cmd"
+}
+
+__pw_env_hook() {
+    __pw_env_clear_state
+
     if [ -f ".env" ]; then
         local _pw_env_output
-        _pw_env_output="$(pw-env export "$PWD" --shell bash)"
+        _pw_env_output="$(pw-env hook "$PWD" --shell bash)"
         if [ -n "$_pw_env_output" ]; then
             eval "$_pw_env_output"
         fi
@@ -60,9 +91,10 @@ fn generate_zsh_hook() -> String {
 # Add to ~/.zshrc: eval "$(pw-env init zsh)"
 
 typeset -g __pw_env_previous_keys=""
+typeset -g __pw_env_previous_commands=""
+typeset -g __pw_env_saved_aliases=""
 
-__pw_env_hook() {
-    # Unset previously exported variables
+__pw_env_clear_state() {
     if [[ -n "$__pw_env_previous_keys" ]]; then
         for key in ${=__pw_env_previous_keys}; do
             unset "$key"
@@ -70,10 +102,40 @@ __pw_env_hook() {
         __pw_env_previous_keys=""
     fi
 
-    # Check if there's a .env file in the current directory
+    if [[ -n "$__pw_env_previous_commands" ]]; then
+        for cmd in ${=__pw_env_previous_commands}; do
+            if alias "$cmd" >/dev/null 2>&1; then
+                unalias "$cmd"
+            fi
+        done
+        __pw_env_previous_commands=""
+    fi
+
+    if [[ -n "$__pw_env_saved_aliases" ]]; then
+        eval "$__pw_env_saved_aliases"
+        __pw_env_saved_aliases=""
+    fi
+}
+
+__pw_env_define_command_wrapper() {
+    local cmd="$1"
+    local existing
+
+    if alias "$cmd" >/dev/null 2>&1; then
+        existing="$(alias "$cmd")"
+        __pw_env_saved_aliases="${__pw_env_saved_aliases}${existing}
+"
+    fi
+
+    alias "$cmd"="pw-env exec --dir \"\$PWD\" -- $cmd"
+}
+
+__pw_env_hook() {
+    __pw_env_clear_state
+
     if [[ -f ".env" ]]; then
         local _pw_env_output
-        _pw_env_output="$(pw-env export "$PWD" --shell zsh)"
+        _pw_env_output="$(pw-env hook "$PWD" --shell zsh)"
         if [[ -n "$_pw_env_output" ]]; then
             eval "$_pw_env_output"
         fi
@@ -95,9 +157,13 @@ fn generate_fish_hook() -> String {
 # Add to ~/.config/fish/config.fish: pw-env init fish | source
 
 set -g __pw_env_previous_keys ""
+set -g __pw_env_previous_commands
 
-function __pw_env_hook --on-variable PWD
-    # Unset previously exported variables
+function __pw_env_saved_function_name --argument-names cmd
+    string replace -ra '[^A-Za-z0-9_]' '_' -- "__pw_env_saved_$cmd"
+end
+
+function __pw_env_clear_state
     if test -n "$__pw_env_previous_keys"
         for key in (string split " " $__pw_env_previous_keys)
             set -e $key
@@ -105,9 +171,42 @@ function __pw_env_hook --on-variable PWD
         set -g __pw_env_previous_keys ""
     end
 
-    # Check if there's a .env file in the current directory
+    for cmd in $__pw_env_previous_commands
+        if functions -q $cmd
+            functions -e $cmd
+        end
+
+        set -l saved (__pw_env_saved_function_name $cmd)
+        if functions -q $saved
+            functions -c $saved $cmd
+            functions -e $saved
+        end
+    end
+
+    set -g __pw_env_previous_commands
+end
+
+function __pw_env_define_command_wrapper --argument-names cmd
+    set -l saved (__pw_env_saved_function_name $cmd)
+
+    if functions -q $saved
+        functions -e $saved
+    end
+
+    if functions -q $cmd
+        functions -c $cmd $saved
+    end
+
+    eval "function $cmd --wraps $cmd
+    pw-env exec --dir \$PWD -- $cmd \$argv
+end"
+end
+
+function __pw_env_hook --on-variable PWD
+    __pw_env_clear_state
+
     if test -f ".env"
-        set -l _pw_env_output (pw-env export $PWD --shell fish)
+        set -l _pw_env_output (pw-env hook $PWD --shell fish)
         if test -n "$_pw_env_output"
             eval $_pw_env_output
         end
@@ -128,25 +227,25 @@ mod tests {
     fn test_bash_hook_contains_cd() {
         let hook = generate_hook("bash");
         assert!(hook.contains("cd()"));
-        assert!(hook.contains("pw-env export"));
+        assert!(hook.contains("pw-env hook"));
+        assert!(hook.contains("pw-env exec"));
         assert!(hook.contains("__pw_env_hook"));
-        assert!(!hook.contains("2>/dev/null"));
     }
 
     #[test]
     fn test_zsh_hook_contains_chpwd() {
         let hook = generate_hook("zsh");
         assert!(hook.contains("chpwd"));
-        assert!(hook.contains("pw-env export"));
-        assert!(!hook.contains("2>/dev/null"));
+        assert!(hook.contains("pw-env hook"));
+        assert!(hook.contains("pw-env exec"));
     }
 
     #[test]
     fn test_fish_hook_contains_on_variable() {
         let hook = generate_hook("fish");
         assert!(hook.contains("--on-variable PWD"));
-        assert!(hook.contains("pw-env export"));
-        assert!(!hook.contains("2>/dev/null"));
+        assert!(hook.contains("pw-env hook"));
+        assert!(hook.contains("pw-env exec"));
     }
 
     #[test]
