@@ -1,6 +1,6 @@
 import { defineConfig } from "vitepress";
 
-const base = process.env.SITE_BASE ?? "/";
+const base = (globalThis as { process?: { env?: { SITE_BASE?: string } } }).process?.env?.SITE_BASE ?? "/";
 
 export default defineConfig({
   title: "pw-env",
@@ -11,11 +11,11 @@ export default defineConfig({
   lastUpdated: true,
   cleanUrls: true,
   head: [
-    ["link", { rel: "icon", type: "image/png", href: `${base}assets/images/Logo-pw-env.png` }],
+    ["link", { rel: "icon", type: "image/png", href: `${base}assets/images/Logo-pw-env@3x.png` }],
     ["meta", { name: "theme-color", content: "#f4f7fb" }],
   ],
   themeConfig: {
-    logo: "/assets/images/Logo-pw-env@3.png",
+    logo: "/assets/images/Logo-pw-env@3x.png",
     siteTitle: "pw-env",
     nav: [
       { text: "Getting started", link: "/getting-started/installation" },

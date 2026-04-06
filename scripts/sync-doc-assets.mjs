@@ -5,12 +5,15 @@ const root = resolve(import.meta.dirname, "..");
 const publicDir = resolve(root, "docs", "public");
 const installSource = resolve(root, "scripts", "install.sh");
 const installDestination = resolve(publicDir, "install.sh");
-const logoSource = resolve(root, "docs", "assets", "images", "Logo-pw-env@3.png");
-const logoDestinationDir = resolve(publicDir, "assets", "images");
-const logoDestination = resolve(logoDestinationDir, "Logo-pw-env@3.png");
+const imageSourceDir = resolve(root, "docs", "assets", "images");
+const imageDestinationDir = resolve(publicDir, "assets", "images");
+const imageFiles = ["Logo-pw-env@3x.png"];
 
 await mkdir(publicDir, { recursive: true });
-await mkdir(logoDestinationDir, { recursive: true });
+await mkdir(imageDestinationDir, { recursive: true });
 
 await copyFile(installSource, installDestination);
-await copyFile(logoSource, logoDestination);
+
+for (const imageFile of imageFiles) {
+	await copyFile(resolve(imageSourceDir, imageFile), resolve(imageDestinationDir, imageFile));
+}

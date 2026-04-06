@@ -6,7 +6,7 @@ hero:
   text: Keep secrets out of it.
   tagline: pw-env resolves empty env keys from 1Password, Bitwarden, or GPG-backed files, then streams the results straight into your shell.
   image:
-    src: /assets/images/Logo-pw-env@3.png
+    src: /assets/images/Logo-pw-env@3x.png
     alt: pw-env
   actions:
     - theme: brand
@@ -30,7 +30,7 @@ features:
 <div class="home-strip">
   <span>Rust CLI</span>
   <span>1Password, Bitwarden, and GPG</span>
-  <span>Shell-first local development</span>
+  <span>Automatic activation</span>
 </div>
 
 <div class="home-intro-grid">
