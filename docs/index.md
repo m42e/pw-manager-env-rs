@@ -112,27 +112,27 @@ $ ./target/release/pw-env --help
 ## Learn the flow
 
 <div class="manual-grid">
-  <a class="manual-card" href="/getting-started/installation">
+  <a class="manual-card" href="./getting-started/installation">
     <strong>Installation</strong>
     <span>Install the binary, check supported targets, and preview the manual locally.</span>
   </a>
-  <a class="manual-card" href="/getting-started/first-project">
+  <a class="manual-card" href="./getting-started/first-project">
     <strong>First project</strong>
     <span>Set up a .env, choose a backend, and run your first export.</span>
   </a>
-  <a class="manual-card" href="/guides/migrate-secrets">
+  <a class="manual-card" href="./guides/migrate-secrets">
     <strong>Migrate plaintext secrets</strong>
     <span>Move existing values into 1Password, Bitwarden, or GPG without rewriting safe local settings.</span>
   </a>
-  <a class="manual-card" href="/guides/approvals">
+  <a class="manual-card" href="./guides/approvals">
     <strong>Approvals and trust</strong>
     <span>Understand .pw-env.toml approvals, .env hash approvals, and project-wide fetch grants.</span>
   </a>
-  <a class="manual-card" href="/concepts/resolution-model">
+  <a class="manual-card" href="./concepts/resolution-model">
     <strong>Resolution model</strong>
     <span>See how pw-env classifies entries and routes them to the correct backend.</span>
   </a>
-  <a class="manual-card" href="/reference/cli">
+  <a class="manual-card" href="./reference/cli">
     <strong>CLI reference</strong>
     <span>Browse the commands, usage forms, and the approvals subcommands in one place.</span>
   </a>
