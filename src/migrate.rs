@@ -213,6 +213,59 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn mask_value_returns_stars_for_short_values() {
+        assert_eq!(mask_value(""), "***");
+        assert_eq!(mask_value("ab"), "***");
+        assert_eq!(mask_value("abc"), "***");
+    }
+
+    #[test]
+    fn mask_value_shows_prefix_for_longer_values() {
+        assert_eq!(mask_value("abcd"), "abc***");
+        assert_eq!(mask_value("abcdef"), "abc***");
+    }
+
+    #[test]
+    fn mask_value_strips_quotes_before_masking() {
+        assert_eq!(mask_value("\"abcdef\""), "abc***");
+        assert_eq!(mask_value("'abcdef'"), "abc***");
+    }
+
+    #[test]
+    fn strip_quotes_removes_double_quotes() {
+        assert_eq!(strip_quotes("\"hello\""), "hello");
+    }
+
+    #[test]
+    fn strip_quotes_removes_single_quotes() {
+        assert_eq!(strip_quotes("'hello'"), "hello");
+    }
+
+    #[test]
+    fn strip_quotes_leaves_unquoted_value() {
+        assert_eq!(strip_quotes("hello"), "hello");
+    }
+
+    #[test]
+    fn strip_quotes_leaves_mismatched_quotes() {
+        assert_eq!(strip_quotes("\"hello'"), "\"hello'");
+        assert_eq!(strip_quotes("'hello\""), "'hello\"");
+    }
+
+    #[test]
+    fn strip_quotes_trims_surrounding_whitespace() {
+        assert_eq!(strip_quotes("  \"hello\"  "), "hello");
+        assert_eq!(strip_quotes("  'hello'  "), "hello");
+    }
+
+    #[test]
+    fn strip_quotes_preserves_inner_content_exactly() {
+        // Verifies the slice bounds use subtraction (not division or addition).
+        assert_eq!(strip_quotes("\"hello world\""), "hello world");
+        assert_eq!(strip_quotes("'it\\'s here'"), "it\\'s here");
+    }
+
+    #[test]
     fn migrate_returns_err_when_no_env_file() {
         let temp_dir = TempDir::new().unwrap();
         let config = crate::config::Config {

@@ -1120,6 +1120,17 @@ mod tests {
     }
 
     #[test]
+    fn is_executable_file_non_executable_regular_file_returns_false() {
+        // A regular file without execute bits must return false.
+        // This kills the & → | and & → ^ mutations in the Unix mode check.
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("plain.txt");
+        std::fs::write(&file_path, "hello").unwrap();
+        // Default mode on newly written files has no execute bits.
+        assert!(!is_executable_file(&file_path));
+    }
+
+    #[test]
     fn config_template_contains_expected_content() {
         let template = config_template();
         assert!(!template.is_empty());

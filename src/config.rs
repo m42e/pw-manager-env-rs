@@ -1314,22 +1314,57 @@ vault = "Work"
         let _ = fs::remove_dir_all(&test_dir);
     }
 
+    #[test]
+    fn test_sha256_hex_produces_correct_digest() {
+        // SHA-256("hello") is a well-known value.
+        assert_eq!(
+            sha256_hex("hello"),
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+    }
+
+    #[test]
+    fn test_sha256_hex_empty_string() {
+        assert_eq!(
+            sha256_hex(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn test_normalize_path_returns_nonempty_canonical_string() {
+        let dir = std::env::temp_dir();
+        let result = normalize_path(&dir);
+        assert!(!result.is_empty());
+        // The canonical path should match what std::fs::canonicalize returns.
+        let expected = dir
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_hash_file_matches_sha256_hex_of_content() {
+        let test_dir = unique_test_dir("hash-file");
+        let path = test_dir.join("content.txt");
+        let content = "backend = \"op\"\n";
+        fs::create_dir_all(&test_dir).unwrap();
+        fs::write(&path, content).unwrap();
+
+        let result = hash_file(&path).unwrap();
+        assert_eq!(result, sha256_hex(content));
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
     fn unique_test_dir(name: &str) -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("pw-env-{name}-{}-{nonce}", std::process::id()))
-    }
-
-    #[test]
-    fn test_sha256_hex_empty_string() {
-        // SHA256 of empty string is well-known
-        let result = sha256_hex("");
-        assert_eq!(
-            result,
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
     }
 
     #[test]
@@ -1896,5 +1931,90 @@ vault = "Work"
         let result = Config::reviewed_migration_entry_fingerprints(&env_path);
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn default_updates_enabled_returns_true() {
+        assert!(UpdateConfig::default().enabled);
+    }
+
+    #[test]
+    fn default_update_check_interval_returns_24() {
+        assert_eq!(UpdateConfig::default().check_interval_hours, 24);
+    }
+
+    #[test]
+    fn default_gpg_file_pattern_returns_env_gpg() {
+        assert_eq!(GpgConfig::default().file_pattern, ".env.gpg");
+    }
+
+    #[test]
+    fn default_log_level_returns_info() {
+        assert_eq!(LogConfig::default().level, "info");
+    }
+
+    #[test]
+    fn default_log_file_returns_some_nonempty_path() {
+        // The default log file path is derived from the system state/data dir and must
+        // be non-empty and end with the expected filename.
+        let log_file = LogConfig::default().file;
+        assert!(log_file.is_some(), "log file default should be Some");
+        let path = log_file.unwrap();
+        assert!(!path.is_empty());
+        assert!(path.ends_with("pw-env.log"), "expected log path ending in pw-env.log, got {path}");
+    }
+
+    #[test]
+    fn approved_secret_fetches_entries_returns_project_wide_entry() {
+        let test_dir = unique_test_dir("asf-entries-pw");
+        fs::create_dir_all(&test_dir).unwrap();
+        let project_dir = test_dir.join("project");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let mut approvals = ApprovedSecretFetches::default();
+        approvals.allow_project_wide(&project_dir);
+
+        let entries = approvals.entries();
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].project_wide);
+    }
+
+    #[test]
+    fn approved_secret_fetches_entries_returns_hash_based_entry() {
+        let test_dir = unique_test_dir("asf-entries-hash");
+        fs::create_dir_all(&test_dir).unwrap();
+        let project_dir = test_dir.join("project");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let mut approvals = ApprovedSecretFetches::default();
+        approvals.approve_hash(&project_dir, "abc123".to_string());
+
+        let entries = approvals.entries();
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].project_wide);
+        assert_eq!(entries[0].env_hash.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn approved_secret_fetches_revoke_returns_true_when_hash_removed() {
+        // Revoking a hash-only approval must return true (not false from && mutation).
+        let test_dir = unique_test_dir("asf-revoke-hash");
+        fs::create_dir_all(&test_dir).unwrap();
+        let project_dir = test_dir.join("project");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let mut approvals = ApprovedSecretFetches::default();
+        approvals.approve_hash(&project_dir, "abc123".to_string());
+
+        // removed_hashes=true, removed_project=false → true || false = true
+        // With && mutation: true && false = false → test fails → kills mutant
+        let revoked = approvals.revoke(&project_dir);
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(revoked);
     }
 }

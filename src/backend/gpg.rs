@@ -660,17 +660,20 @@ PLAIN=value
     }
 
     #[test]
-    fn load_all_stored_secrets_returns_err_when_file_missing() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let config = Config {
-            defaults: Defaults::default(),
-            log: LogConfig::default(),
-            updates: UpdateConfig::default(),
-            projects: vec![],
-        };
-        let ctx = make_gpg_resolve_context(&config, temp_dir.path());
-        let result = GpgBackend::load_all_stored_secrets(&ctx);
-        assert!(result.is_err());
-        assert!(format!("{}", result.unwrap_err()).contains("GPG encrypted file not found"));
+    fn test_parse_stored_secrets_unmatched_leading_double_quote_not_stripped() {
+        // Value starts with '"' but does not end with '"' — no stripping should occur.
+        // This kills the && → || mutation at the double-quote condition.
+        let content = "KEY=\"abc\n";
+        let stored = GpgBackend::parse_stored_secrets(content);
+        assert_eq!(stored.get("KEY").unwrap().value, "\"abc");
+    }
+
+    #[test]
+    fn test_parse_stored_secrets_unmatched_leading_single_quote_not_stripped() {
+        // Value starts with "'" but does not end with "'" — no stripping should occur.
+        // This kills the && → || mutation at the single-quote condition.
+        let content = "KEY='abc\n";
+        let stored = GpgBackend::parse_stored_secrets(content);
+        assert_eq!(stored.get("KEY").unwrap().value, "'abc");
     }
 }

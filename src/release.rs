@@ -537,6 +537,40 @@ mod tests {
     }
 
     #[test]
+    fn is_newer_release_returns_true_for_higher_patch() {
+        let current = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        let newer = Version::new(current.major, current.minor, current.patch + 1);
+        assert!(is_newer_release(&newer.to_string()).unwrap());
+    }
+
+    #[test]
+    fn is_newer_release_returns_false_for_current_version() {
+        assert!(!is_newer_release(env!("CARGO_PKG_VERSION")).unwrap());
+    }
+
+    #[test]
+    fn is_newer_release_returns_false_for_older_version() {
+        let current = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        // Build a version guaranteed to be older: major.minor.0 unless already patch 0.
+        let older = if current.patch > 0 {
+            Version::new(current.major, current.minor, current.patch - 1)
+        } else if current.minor > 0 {
+            Version::new(current.major, current.minor - 1, 0)
+        } else {
+            // Current is 0.0.0; no older version to construct — skip the assertion.
+            return;
+        };
+        assert!(!is_newer_release(&older.to_string()).unwrap());
+    }
+
+    #[test]
+    fn is_newer_release_returns_true_for_higher_major() {
+        let current = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        let newer = Version::new(current.major + 1, 0, 0);
+        assert!(is_newer_release(&newer.to_string()).unwrap());
+    }
+
+    #[test]
     fn github_release_owner_constant_matches_repo_url() {
         assert!(RELEASE_API_URL.contains("/m42e/"));
     }

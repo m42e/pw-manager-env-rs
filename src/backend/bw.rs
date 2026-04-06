@@ -780,9 +780,67 @@ mod tests {
             assert!(result.is_ok(), "expected Ok, got: {:?}", result);
         });
     }
-}
+    #[test]
+    fn test_extract_field_from_value_password_prefers_login_over_username() {
+        // When both login.password and login.username are present, asking for
+        // "password" must return the password field, not the username.
+        let item = serde_json::json!({
+            "login": { "password": "mypass", "username": "myuser" }
+        });
+        assert_eq!(
+            BwBackend::extract_field_from_value(&item, "password").unwrap(),
+            "mypass"
+        );
+    }
 
-/// Simple base64 encoding (no padding issues) — avoids pulling in a crate for this one use.
+    #[test]
+    fn test_extract_field_from_value_username_ignores_password() {
+        // When both fields are present, asking for "username" must return the
+        // username field, not the password field.
+        let item = serde_json::json!({
+            "login": { "password": "mypass", "username": "myuser" }
+        });
+        assert_eq!(
+            BwBackend::extract_field_from_value(&item, "username").unwrap(),
+            "myuser"
+        );
+    }
+
+    #[test]
+    fn test_extract_field_from_value_custom_field_second_item_selected() {
+        // When multiple custom fields exist, the correct one (by name) is returned.
+        let item = serde_json::json!({
+            "fields": [
+                { "name": "other_field", "value": "other_value" },
+                { "name": "api_key", "value": "secret123" }
+            ]
+        });
+        assert_eq!(
+            BwBackend::extract_field_from_value(&item, "api_key").unwrap(),
+            "secret123"
+        );
+    }
+
+    #[test]
+    fn test_base64_encode_one_byte() {
+        assert_eq!(base64_encode(b"f"), "Zg==");
+    }
+
+    #[test]
+    fn test_base64_encode_two_bytes() {
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+    }
+
+    #[test]
+    fn test_base64_encode_three_bytes() {
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+    }
+
+    #[test]
+    fn test_base64_encode_six_bytes() {
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+}
 fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::new();

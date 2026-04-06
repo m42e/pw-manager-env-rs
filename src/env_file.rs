@@ -632,6 +632,126 @@ mod tests {
         assert_eq!(rewritten, "KEEP_ME=value # no-migrate\nCLEAR_ME=\n");
     }
 
+    #[test]
+    fn split_value_and_comment_keeps_hash_inside_single_quotes() {
+        let (value, comment) = split_value_and_comment("'secret#value'");
+        assert_eq!(value, "'secret#value'");
+        assert_eq!(comment, None);
+    }
+
+    #[test]
+    fn split_value_and_comment_splits_hash_after_single_quoted_value() {
+        let (value, comment) = split_value_and_comment("'secret' # annotation");
+        assert_eq!(value, "'secret'");
+        assert_eq!(comment.as_deref(), Some("# annotation"));
+    }
+
+    #[test]
+    fn split_value_and_comment_ignores_single_quote_inside_double_quotes() {
+        // A single quote inside double quotes must not toggle in_single_quotes.
+        // If it did, the closing double-quote would fail its guard and the `#` would
+        // not be recognized as the start of a comment.
+        let (value, comment) = split_value_and_comment("\"hello'world\" # comment");
+        assert_eq!(value, "\"hello'world\"");
+        assert_eq!(comment.as_deref(), Some("# comment"));
+    }
+
+    #[test]
+    fn split_value_and_comment_ignores_double_quote_inside_single_quotes() {
+        // A double quote inside single quotes must not toggle in_double_quotes.
+        let (value, comment) = split_value_and_comment("'hello\"world' # comment");
+        assert_eq!(value, "'hello\"world'");
+        assert_eq!(comment.as_deref(), Some("# comment"));
+    }
+
+    #[test]
+    fn comment_has_no_migrate_marker_returns_false_for_regular_comment() {
+        assert!(!comment_has_no_migrate_marker("# some comment"));
+        assert!(!comment_has_no_migrate_marker("# description of the variable"));
+        assert!(!comment_has_no_migrate_marker("# skip"));
+    }
+
+    #[test]
+    fn comment_has_no_migrate_marker_returns_true_for_marker() {
+        assert!(comment_has_no_migrate_marker("# no-migrate"));
+        assert!(comment_has_no_migrate_marker("# NO-MIGRATE"));
+        assert!(comment_has_no_migrate_marker("# no-migrate: keep this in .env"));
+    }
+
+    #[test]
+    fn strip_quotes_does_not_strip_mismatched_quotes() {
+        assert_eq!(strip_quotes("\"hello'"), "\"hello'");
+        assert_eq!(strip_quotes("'hello\""), "'hello\"");
+    }
+
+    #[test]
+    fn looks_like_secret_name_detects_auth_key_segment_pair() {
+        // "auth_key" is not among the direct patterns, so segment pair logic is required.
+        assert!(looks_like_secret_name("SERVICE_AUTH_KEY"));
+        assert!(looks_like_secret_name("AUTH_KEY_VALUE"));
+    }
+
+    #[test]
+    fn looks_like_secret_name_does_not_match_non_secret_key_names() {
+        assert!(!looks_like_secret_name("AUTH_URL"));
+        assert!(!looks_like_secret_name("LOG_LEVEL"));
+        assert!(!looks_like_secret_name("DATABASE_HOST"));
+    }
+
+    #[test]
+    fn contains_embedded_credentials_empty_username_returns_false() {
+        assert!(!contains_embedded_credentials("postgres://:secret@db.example.com/app"));
+    }
+
+    #[test]
+    fn contains_embedded_credentials_empty_password_returns_false() {
+        assert!(!contains_embedded_credentials("postgres://user:@db.example.com/app"));
+    }
+
+    #[test]
+    fn contains_embedded_credentials_both_present_returns_true() {
+        assert!(contains_embedded_credentials("postgres://user:secret@db.example.com/app"));
+    }
+
+    #[test]
+    fn has_common_secret_prefix_detects_each_known_prefix() {
+        assert!(has_common_secret_prefix("ghp_xxxx"));
+        assert!(has_common_secret_prefix("github_pat_xxxx"));
+        assert!(has_common_secret_prefix("glpat-xxxx"));
+        assert!(has_common_secret_prefix("xoxb-xxxx"));
+        assert!(has_common_secret_prefix("xoxp-xxxx"));
+        assert!(has_common_secret_prefix("xoxs-xxxx"));
+        assert!(has_common_secret_prefix("sk-xxxx"));
+        assert!(has_common_secret_prefix("AKIAxxxx"));
+    }
+
+    #[test]
+    fn has_common_secret_prefix_returns_false_for_plain_value() {
+        assert!(!has_common_secret_prefix("normalvalue"));
+        assert!(!has_common_secret_prefix("debug"));
+    }
+
+    #[test]
+    fn looks_like_high_entropy_secret_low_entropy_is_not_secret() {
+        // 20 identical chars: entropy = 0 — should not be flagged even though len >= 20.
+        assert!(!looks_like_high_entropy_secret("aaaaaaaaaaaaaaaaaaaa"));
+    }
+
+    #[test]
+    fn looks_like_high_entropy_secret_medium_entropy_short_is_not_secret() {
+        // 24 chars, 12 unique chars each appearing twice → entropy ≈ log2(12) ≈ 3.58.
+        // len 24 < 32, so the second condition (len≥32 && entropy≥3.4) fails.
+        // The first condition also fails (entropy < 3.8).
+        assert!(!looks_like_high_entropy_secret("aabbccddeeffgghhiijjkkll"));
+    }
+
+    #[test]
+    fn looks_like_high_entropy_secret_medium_entropy_long_is_secret() {
+        // 33 chars, 11 unique chars each appearing 3 times → entropy ≈ log2(11) ≈ 3.46.
+        // Satisfies the second condition: len≥32 && entropy≥3.4.
+        assert!(looks_like_high_entropy_secret("abcdefghijkabcdefghijkabcdefghijk"));
+    }
+
     fn write_test_env(contents: &str) -> PathBuf {
         use std::time::{SystemTime, UNIX_EPOCH};
 

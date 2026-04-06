@@ -275,6 +275,23 @@ mod tests {
     }
 
     #[test]
+    fn test_format_key_tracking_returns_space_separated_keys() {
+        let keys = vec!["API_KEY".to_string(), "DB_PASSWORD".to_string()];
+        assert_eq!(format_key_tracking(&keys), "API_KEY DB_PASSWORD");
+    }
+
+    #[test]
+    fn test_format_key_tracking_filters_invalid_keys() {
+        let keys = vec!["VALID_KEY".to_string(), "bad key".to_string()];
+        assert_eq!(format_key_tracking(&keys), "VALID_KEY");
+    }
+
+    #[test]
+    fn test_format_key_tracking_empty_input_returns_empty() {
+        assert_eq!(format_key_tracking(&[]), "");
+    }
+
+    #[test]
     fn test_format_command_wrappers_posix() {
         let output = format_command_wrappers(
             &["cargo".to_string(), "npm".to_string()],
