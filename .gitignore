@@ -3,4 +3,5 @@
 /node_modules
 /docs/.vitepress/cache
 /docs/public/install.sh
+TODO.md
 
