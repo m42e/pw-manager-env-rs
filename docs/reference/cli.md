@@ -7,6 +7,7 @@
 | Command | Purpose |
 | --- | --- |
 | `init` | Generate shell hook code for `bash`, `zsh`, or `fish` |
+| `exec` | Run a command with resolved secrets only in the child process |
 | `export` | Print shell exports for the current project |
 | `load` | Show a human-readable view of the current resolution state |
 | `migrate` | Move plaintext values into the configured backend |
@@ -23,6 +24,18 @@ $ pw-env init <SHELL>
 
 Generate shell hook code for automatic loading on directory change. Supported shells are `bash`, `zsh`, and `fish`.
 
+If the active project config defines `commands`, the generated hook installs transient wrappers for the matching executable names instead of exporting resolved secrets into the parent shell.
+
+## `exec`
+
+```console
+$ pw-env exec [--dir <DIR>] -- <COMMAND> [ARGS...]
+```
+
+Resolve the current `.env` file, inject the resolved variables only into the child process, and then replace `pw-env` with the target command. This keeps the parent shell environment clean.
+
+Use this directly when you want explicit transient loading, or let the generated shell hook call it for configured project commands.
+
 ## `export`
 
 ```console
@@ -30,6 +43,8 @@ $ pw-env export [--shell <SHELL>] [DIR]
 ```
 
 Resolve the current `.env` file and print export statements for `bash`, `zsh`, or `fish`. If the directory has no `.env` file, the command prints nothing.
+
+This command is still useful for one-off shell exports. Projects that configure `commands` use transient wrappers through the generated hook instead of directory-wide exports.
 
 ## `load`
 

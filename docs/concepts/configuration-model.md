@@ -32,6 +32,14 @@ The same backend-specific sections can also appear under `[[projects]]`, and ins
 
 `item` can be set at the project level or inside the backend-specific defaults for 1Password and Bitwarden. A project-level `item` wins over the backend-specific default item.
 
+## Command-scoped shell behavior
+
+Projects can also declare `commands`, a list of exact command names or executable-name glob patterns that should receive secrets transiently through the generated shell hook.
+
+That setting is resolved with the same precedence as the rest of the project configuration: the most specific matching `[[projects]]` entry wins, and an approved `.pw-env.toml` can override it for the current repository.
+
+When `commands` is present, pw-env keeps using the project config to resolve secrets, but the shell integration changes behavior: it installs wrappers for those commands instead of exporting resolved variables into the parent shell session.
+
 ## Local override discovery
 
 `.pw-env.toml` is not searched across the whole filesystem. pw-env only walks upward from the current directory until it reaches the repository root, then stops.

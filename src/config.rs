@@ -196,6 +196,8 @@ pub struct ProjectOverride {
     /// Specific item name in the password store for this project
     #[serde(default)]
     pub item: Option<String>,
+    #[serde(default)]
+    pub commands: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -210,6 +212,8 @@ struct ProjectDirectoryOverride {
     pub gpg: Option<GpgConfig>,
     #[serde(default)]
     pub item: Option<String>,
+    #[serde(default)]
+    pub commands: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -281,6 +285,7 @@ impl Config {
                     bw: local_override.bw,
                     gpg: local_override.gpg,
                     item: local_override.item,
+                    commands: local_override.commands,
                 });
             }
         }
@@ -501,7 +506,7 @@ impl Config {
         self.projects
             .iter()
             .filter_map(|project| {
-                let project_path = expand_path(&project.path);
+                let project_path = normalized_project_path(&project.path);
                 if dir.starts_with(&project_path) {
                     Some((project_path.components().count(), project))
                 } else {
@@ -553,6 +558,13 @@ impl Config {
             "bw" => self.effective_bw(dir).item.as_deref(),
             _ => None,
         }
+    }
+
+    /// Resolve configured transient command wrappers for a given directory.
+    pub fn effective_commands(&self, dir: &Path) -> &[String] {
+        self.project_for(dir)
+            .map(|project| project.commands.as_slice())
+            .unwrap_or(&[])
     }
 }
 
@@ -927,6 +939,13 @@ fn expand_path(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+fn normalized_project_path(path: &str) -> PathBuf {
+    let expanded = expand_path(path);
+    expanded
+        .canonicalize()
+        .unwrap_or(expanded)
+}
+
 fn normalize_path(path: &Path) -> String {
     path.canonicalize()
         .unwrap_or_else(|_| path.to_path_buf())
@@ -1129,6 +1148,7 @@ backend = "gpg"
         let toml_str = r#"
 backend = "op"
 item = "service-a-env"
+commands = ["cargo", "npm"]
 
 [op]
 vault = "Work"
@@ -1137,10 +1157,33 @@ vault = "Work"
         let local_override: ProjectDirectoryOverride = toml::from_str(toml_str).unwrap();
         assert_eq!(local_override.backend.as_deref(), Some("op"));
         assert_eq!(local_override.item.as_deref(), Some("service-a-env"));
+        assert_eq!(local_override.commands, vec!["cargo", "npm"]);
         assert_eq!(
             local_override.op.and_then(|op| op.vault),
             Some("Work".to_string())
         );
+    }
+
+    #[test]
+    fn test_effective_commands_for_project() {
+        let config = Config {
+            defaults: Defaults::default(),
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![ProjectOverride {
+                path: "/home/user/work/service-a".to_string(),
+                commands: vec!["cargo".to_string(), "npm".to_string()],
+                ..ProjectOverride::default()
+            }],
+        };
+
+        assert_eq!(
+            config.effective_commands(Path::new("/home/user/work/service-a/api")),
+            ["cargo".to_string(), "npm".to_string()]
+        );
+        assert!(config
+            .effective_commands(Path::new("/home/user/other"))
+            .is_empty());
     }
 
     #[test]
@@ -1223,10 +1266,15 @@ vault = "Work"
         let test_dir = unique_test_dir("validate-project-override");
         let override_path = test_dir.join(PROJECT_OVERRIDE_FILE_NAME);
         fs::create_dir_all(&test_dir).unwrap();
-        fs::write(&override_path, "backend = \"op\"\n[op]\nvault = \"Work\"\n").unwrap();
+        fs::write(
+            &override_path,
+            "backend = \"op\"\ncommands = [\"cargo\"]\n[op]\nvault = \"Work\"\n",
+        )
+        .unwrap();
 
         let parsed = validate_project_override(&override_path).unwrap();
         assert_eq!(parsed.backend.as_deref(), Some("op"));
+        assert_eq!(parsed.commands, vec!["cargo"]);
         assert_eq!(
             parsed.op.and_then(|config| config.vault),
             Some("Work".to_string())
