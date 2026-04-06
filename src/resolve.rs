@@ -265,13 +265,13 @@ mod tests {
         let line = format_credential_fetch_audit(
             &env_path,
             &dir,
-            Some("pw-manager-env-rs"),
+            Some("pw-env"),
             "1Password",
             "DATABASE_URL",
         );
 
         assert!(line.contains("AUDIT credential_fetch"));
-        assert!(line.contains("project=pw-manager-env-rs"));
+        assert!(line.contains("project=pw-env"));
         assert!(line.contains(&format!("project_root={}", root.display())));
         assert!(line.contains(&format!("folder={}", dir.display())));
         assert!(line.contains(&format!("env_file={}", env_path.display())));

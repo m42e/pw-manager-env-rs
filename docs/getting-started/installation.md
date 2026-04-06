@@ -7,19 +7,19 @@ pw-env ships prebuilt binaries for macOS, Linux, and Windows, and it can also be
 === "Latest release"
 
     ```console
-    $ curl -fsSL https://m42e.github.io/pw-manager-env-rs/install.sh | bash
+    $ curl -fsSL https://m42e.github.io/pw-env/install.sh | bash
     ```
 
 === "Specific version"
 
     ```console
-    $ curl -fsSL https://m42e.github.io/pw-manager-env-rs/install.sh | bash -s -- --version v0.2.8
+    $ curl -fsSL https://m42e.github.io/pw-env/install.sh | bash -s -- --version v0.2.8
     ```
 
 === "Custom install directory"
 
     ```console
-    $ curl -fsSL https://m42e.github.io/pw-manager-env-rs/install.sh | bash -s -- --dir "$HOME/.local/bin"
+    $ curl -fsSL https://m42e.github.io/pw-env/install.sh | bash -s -- --dir "$HOME/.local/bin"
     ```
 
 If you already have `pw-env` installed, you can also update the current binary in place with `pw-env update`. See [Updating pw-env](../guides/update.md).

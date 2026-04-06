@@ -1,8 +1,8 @@
 site_name: pw-env
 site_description: Securely load environment variables from password managers
-site_url: !ENV [SITE_URL, "https://m42e.github.io/pw-manager-env-rs/"]
-repo_url: https://github.com/m42e/pw-manager-env-rs
-repo_name: m42e/pw-manager-env-rs
+site_url: !ENV [SITE_URL, "https://m42e.github.io/pw-env/"]
+repo_url: https://github.com/m42e/pw-env
+repo_name: m42e/pw-env
 edit_uri: edit/main/docs/
 docs_dir: docs
 site_dir: site
@@ -59,7 +59,7 @@ extra:
   generator: false
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/m42e/pw-manager-env-rs
+      link: https://github.com/m42e/pw-env
 
 extra_css:
   - assets/stylesheets/extra.css

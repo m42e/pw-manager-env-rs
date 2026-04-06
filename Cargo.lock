@@ -953,7 +953,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pw-manager-env-rs"
+name = "pw-env"
 version = "0.2.8"
 dependencies = [
  "anyhow",

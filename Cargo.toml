@@ -1,5 +1,5 @@
 [package]
-name = "pw-manager-env-rs"
+name = "pw-env"
 version = "0.2.8"
 edition = "2024"
 

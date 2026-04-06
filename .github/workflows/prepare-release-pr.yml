@@ -45,7 +45,7 @@ jobs:
       - name: Update version in Cargo.toml
         run: |
           sed -i 's/^version = ".*"/version = "${{ inputs.version }}"/' Cargo.toml
-          cargo check --quiet 2>/dev/null || cargo update -p pw-manager-env-rs
+          cargo check --quiet 2>/dev/null || cargo update -p pw-env
 
       - name: Generate release notes
         run: |

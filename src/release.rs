@@ -14,9 +14,9 @@ use zip::ZipArchive;
 
 const RELEASE_CHECK_STATE_FILE: &str = "release-check.json";
 const GITHUB_OWNER: &str = "m42e";
-const GITHUB_REPO: &str = "pw-manager-env-rs";
-const RELEASE_API_URL: &str = "https://api.github.com/repos/m42e/pw-manager-env-rs/releases/latest";
-const RELEASES_URL: &str = "https://github.com/m42e/pw-manager-env-rs/releases/latest";
+const GITHUB_REPO: &str = "pw-env";
+const RELEASE_API_URL: &str = "https://api.github.com/repos/m42e/pw-env/releases/latest";
+const RELEASES_URL: &str = "https://github.com/m42e/pw-env/releases/latest";
 const REQUEST_TIMEOUT_SECS: u64 = 2;
 const DOWNLOAD_TIMEOUT_SECS: u64 = 120;
 

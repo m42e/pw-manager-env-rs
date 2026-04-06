@@ -31,7 +31,7 @@ fi
 
 # Update version in Cargo.toml
 sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
-cargo check --quiet 2>/dev/null || cargo update -p pw-manager-env-rs
+cargo check --quiet 2>/dev/null || cargo update -p pw-env
 
 # Generate release notes
 mkdir -p release-notes

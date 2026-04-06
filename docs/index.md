@@ -75,13 +75,13 @@ Project-local overrides in `.pw-env.toml` and credential fetching from `.env` ar
 === "Standalone installer"
 
     ```console
-    $ curl -fsSL https://m42e.de/pw-manager-env-rs/install.sh | bash
+    $ curl -fsSL https://m42e.de/pw-env/install.sh | bash
     ```
 
 === "Specific release"
 
     ```console
-    $ curl -fsSL https://m42e.de/pw-manager-env-rs/install.sh | bash -s -- --version v0.2.8
+    $ curl -fsSL https://m42e.de/pw-env/install.sh | bash -s -- --version v0.2.8
     ```
 
 === "Build from source"

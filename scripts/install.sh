@@ -2,7 +2,7 @@
 set -euo pipefail
 
 OWNER="m42e"
-REPO="pw-manager-env-rs"
+REPO="pw-env"
 BINARY_NAME="pw-env"
 VERSION="latest"
 DRY_RUN=0

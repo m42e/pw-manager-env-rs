@@ -98,7 +98,7 @@ Use the helper script to prepare the secrets or upload them directly with GitHub
   --apple-id 'developer@example.com' \
   --app-password 'abcd-efgh-ijkl-mnop' \
   --team-id 'TEAMID1234' \
-  --repo m42e/pw-manager-env-rs \
+  --repo m42e/pw-env \
   --set-gh-secrets
 ```
 
