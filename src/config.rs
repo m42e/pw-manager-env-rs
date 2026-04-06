@@ -805,13 +805,18 @@ impl ApprovedSecretFetches {
             .or_default();
         hashes.insert(env_hash);
         // Limit stored hashes per project to prevent unbounded growth.
-        // BTreeSet is sorted, so removing the smallest (oldest hex digest) is
-        // acceptable — the important invariant is that the just-inserted hash
-        // is retained, and the set stays bounded.
+        // Eviction order is lexicographic (BTreeSet), not chronological, but
+        // the important invariant is that the set stays bounded and the
+        // just-inserted hash is retained.
         const MAX_HASHES_PER_PROJECT: usize = 10;
-        while hashes.len() > MAX_HASHES_PER_PROJECT {
-            if let Some(oldest) = hashes.iter().next().cloned() {
-                hashes.remove(&oldest);
+        if hashes.len() > MAX_HASHES_PER_PROJECT {
+            let to_remove: Vec<String> = hashes
+                .iter()
+                .take(hashes.len() - MAX_HASHES_PER_PROJECT)
+                .cloned()
+                .collect();
+            for key in to_remove {
+                hashes.remove(&key);
             }
         }
     }
