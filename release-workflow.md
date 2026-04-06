@@ -4,6 +4,8 @@ This repository uses a PR-driven release workflow.
 
 Release preparation starts with `.github/workflows/prepare-release-pr.yml`, merge-triggered tagging is handled by `.github/workflows/tag-release-pr.yml`, and publishing is handled by `.github/workflows/release.yml` for tags that match `v*`.
 
+If a release PR is closed without merging, `.github/workflows/tag-release-pr.yml` deletes the corresponding `release/v<version>` branch automatically.
+
 ## Release Steps
 
 1. Dispatch the release preparation workflow with a semver version without a leading `v`.
@@ -17,6 +19,8 @@ You can also run the same workflow from the GitHub Actions UI.
 2. Review the generated release PR.
 
 The workflow creates branch `release/v0.1.1`, updates `Cargo.toml`, refreshes `Cargo.lock` when needed, generates `release-notes/v0.1.1.md`, and opens PR `Release v0.1.1` labeled `release`.
+
+If you close that PR without merging it, the `release/v0.1.1` branch is removed automatically.
 
 3. Merge the release PR into `main` after review and CI pass.
 
