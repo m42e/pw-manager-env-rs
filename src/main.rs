@@ -8,7 +8,8 @@ mod resolve;
 mod shell;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use glob::Pattern;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -88,6 +89,17 @@ enum Commands {
     },
     /// Print the default configuration file template
     ConfigTemplate,
+    /// Generate shell completion script
+    ///
+    /// Add one of the following lines to your shell's startup file:
+    ///
+    ///   Bash (~/.bashrc):   eval "$(pw-env completions bash)"
+    ///   Zsh  (~/.zshrc):    eval "$(pw-env completions zsh)"
+    ///   Fish (~/.config/fish/config.fish):  pw-env completions fish | source
+    Completions {
+        /// Shell to generate completions for (bash, zsh, fish, powershell, elvish)
+        shell: Shell,
+    },
     #[command(hide = true)]
     Hook {
         /// Directory to inspect for shell integration state (defaults to current directory)
@@ -378,6 +390,11 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
 
         Commands::ConfigTemplate => {
             print!("{}", config_template());
+            Ok(())
+        }
+
+        Commands::Completions { shell } => {
+            generate(shell, &mut Cli::command(), "pw-env", &mut std::io::stdout());
             Ok(())
         }
     }
