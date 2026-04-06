@@ -327,7 +327,7 @@ Main subcommands:
 
 - `pw-env init <bash|zsh|fish>` prints shell hook code
 - `pw-env export [dir] --shell <bash|zsh|fish>` prints resolved exports for shell evaluation
-- `pw-env load [dir]` prints a human-readable resolution summary and export statements
+- `pw-env load [dir]` prints a human-readable resolution summary and masked export statements; pass `--reveal` to show full values
 - `pw-env migrate [dir]` interactively stores plaintext `.env` values in the configured backend and clears them from `.env`; entries marked with `no-migrate` are skipped
 - `pw-env check` checks available backends and active configuration
 - `pw-env approvals list` lists approved project-local override files and hashes

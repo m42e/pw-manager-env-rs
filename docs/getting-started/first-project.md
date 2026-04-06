@@ -83,7 +83,7 @@ $ pw-env load .
 $ pw-env check
 ```
 
-`pw-env load` shows how each entry was classified before printing masked export output, which makes it a good first debugging command.
+`pw-env load` shows how each entry was classified before printing masked export output with only a short value prefix, which makes it a good first debugging command. Add `--reveal` only when you intentionally need to inspect the full resolved values.
 
 ## 5. Install automatic loading when you are ready
 

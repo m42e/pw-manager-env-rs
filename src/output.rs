@@ -1,5 +1,17 @@
 use std::collections::BTreeMap;
 
+/// Show only a short prefix of a secret-like value for inspection output.
+pub fn obfuscate_value(value: &str) -> String {
+    let visible: String = value.chars().take(3).collect();
+    let total_chars = value.chars().count();
+
+    if total_chars <= 3 {
+        "***".to_string()
+    } else {
+        format!("{visible}***")
+    }
+}
+
 /// Format resolved key-value pairs as shell export statements.
 /// Uses single-quote escaping to prevent shell injection.
 pub fn format_exports(vars: &BTreeMap<String, String>, shell: ShellSyntax) -> String {
@@ -100,6 +112,21 @@ mod tests {
         vars.insert("API_KEY".to_string(), "abc123".to_string());
         let output = format_exports(&vars, ShellSyntax::Fish);
         assert!(output.contains("set -gx API_KEY 'abc123'\n"));
+    }
+
+    #[test]
+    fn test_obfuscate_value_long() {
+        assert_eq!(obfuscate_value("abcdef"), "abc***");
+    }
+
+    #[test]
+    fn test_obfuscate_value_short() {
+        assert_eq!(obfuscate_value("abc"), "***");
+    }
+
+    #[test]
+    fn test_obfuscate_value_unicode_safe() {
+        assert_eq!(obfuscate_value("a😀bcdef"), "a😀b***");
     }
 
     #[test]

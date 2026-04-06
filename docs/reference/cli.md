@@ -34,10 +34,10 @@ Resolve the current `.env` file and print export statements for `bash`, `zsh`, o
 ## `load`
 
 ```console
-$ pw-env load [DIR]
+$ pw-env load [--reveal] [DIR]
 ```
 
-Print a human-readable summary of how each `.env` entry was classified, then print masked export output. Use this when you need to debug what pw-env would do without wiring it into a shell.
+Print a human-readable summary of how each `.env` entry was classified, then print masked export output that shows only a short prefix of each resolved value. Pass `--reveal` when you intentionally need the full resolved content. Use this when you need to debug what pw-env would do without wiring it into a shell.
 
 ## `migrate`
 

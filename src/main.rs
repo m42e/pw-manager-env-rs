@@ -46,6 +46,9 @@ enum Commands {
     Load {
         /// Directory to look for .env file in (defaults to current directory)
         dir: Option<PathBuf>,
+        /// Show full resolved values instead of masked previews
+        #[arg(long)]
+        reveal: bool,
     },
     /// Migrate plaintext secrets from .env into the password manager
     Migrate {
@@ -197,7 +200,7 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
             Ok(())
         }
 
-        Commands::Load { dir } => {
+        Commands::Load { dir, reveal } => {
             let dir = resolve_dir(dir)?;
             let config = config::Config::load_for_dir(&dir)?;
             let env_path = env_file::EnvFile::find(&dir)
@@ -242,14 +245,30 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
                 resolved.len(),
                 env_file.resolvable_entries().len()
             );
-            for key in resolved.keys() {
-                eprintln!("  {} = ****", key);
+            for (key, value) in &resolved {
+                let display_value = if reveal {
+                    value.clone()
+                } else {
+                    output::obfuscate_value(value)
+                };
+                eprintln!("  {} = {}", key, display_value);
             }
 
-            // Also print as export statements for piping
+            let display_values = resolved
+                .iter()
+                .map(|(key, value)| {
+                    let display_value = if reveal {
+                        value.clone()
+                    } else {
+                        output::obfuscate_value(value)
+                    };
+                    (key.clone(), display_value)
+                })
+                .collect();
+
             print!(
                 "{}",
-                output::format_exports(&resolved, output::ShellSyntax::Posix)
+                output::format_exports(&display_values, output::ShellSyntax::Posix)
             );
 
             Ok(())
