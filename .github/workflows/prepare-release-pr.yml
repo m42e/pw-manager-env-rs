@@ -41,9 +41,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # pin: v2.9.1
 
-      - name: Install git-cliff
-        uses: kenji-miyake/setup-git-cliff@2778609c643a39a2576c4bae2e493b855eb4aee8 # pin: v2.0.1
-
       - name: Install rumdl
         run: python -m pip install --user rumdl
 
@@ -52,11 +49,16 @@ jobs:
           sed -i 's/^version = ".*"/version = "${{ inputs.version }}"/' Cargo.toml
           cargo check --quiet 2>/dev/null || cargo update -p pw-env
 
+      - name: Create release notes directory
+        run: mkdir -p release-notes
+
       - name: Generate release notes
-        run: |
-          mkdir -p release-notes
-          git-cliff --config .github/cliff.toml --tag "v${{ inputs.version }}" --unreleased --strip header \
-            -o "release-notes/v${{ inputs.version }}.md"
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: .github/cliff.toml
+          args: --tag "v${{ inputs.version }}" --unreleased --strip header
+        env:
+          OUTPUT: release-notes/v${{ inputs.version }}.md
 
       - name: Format release notes with rumdl
         run: ~/.local/bin/rumdl fmt "release-notes/v${{ inputs.version }}.md"
@@ -77,7 +79,7 @@ jobs:
           git checkout -b "$branch"
           git add Cargo.toml Cargo.lock release-notes/
           git commit -m "chore: prepare release v${{ inputs.version }}"
-          git push origin "$branch"
+          git push origin "$branch" --force
           gh pr create \
             --base main \
             --head "$branch" \

@@ -240,12 +240,13 @@ jobs:
         run: |
           cp LICENSE dist/LICENSE
 
-      - name: Install git-cliff
-        uses: kenji-miyake/setup-git-cliff@2778609c643a39a2576c4bae2e493b855eb4aee8 # pin: v2.0.1
-
       - name: Generate release notes
-        run: |
-          git-cliff --config .github/cliff.toml --latest --strip header -o RELEASE_NOTES.md
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: .github/cliff.toml
+          args: --latest --strip header
+        env:
+          OUTPUT: RELEASE_NOTES.md
 
       - name: Create GitHub release
         env:
