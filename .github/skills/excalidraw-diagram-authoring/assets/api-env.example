@@ -1,9 +1,0 @@
-EXCALIDRAW_BROWSER_URL=https://excalidraw.pb42.de
-EXCALIDRAW_POST_URL=https://excalidraw-service.pb42.de/api/v2/post/
-EXCALIDRAW_GET_URL_BASE=https://excalidraw-service.pb42.de/api/v2/
-EXCALIDRAW_STORE_BASE_URL=https://excalidraw-service.pb42.de
-EXCALIDRAW_STORE_HEALTH_URL=https://excalidraw-service.pb42.de/healthz
-VITE_APP_WS_SERVER_URL=https://excalidraw-room.pb42.de
-VITE_APP_BACKEND_STORE=https://excalidraw-service.pb42.de
-VITE_APP_BACKEND_V2_GET_URL=https://excalidraw-service.pb42.de/api/v2/
-VITE_APP_BACKEND_V2_POST_URL=https://excalidraw-service.pb42.de/api/v2/post/
