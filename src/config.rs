@@ -8,6 +8,38 @@ use tracing::debug;
 
 const PROJECT_OVERRIDE_FILE_NAME: &str = ".pw-env.toml";
 
+fn base_dir_from_env(
+    env_value: Option<PathBuf>,
+    home_dir: Option<PathBuf>,
+    fallback_components: &[&str],
+) -> PathBuf {
+    let has_env_override = env_value.is_some();
+    let mut path = env_value.unwrap_or_else(|| home_dir.unwrap_or_else(|| PathBuf::from("~")));
+    if !has_env_override {
+        for component in fallback_components {
+            path.push(component);
+        }
+    }
+
+    path
+}
+
+pub fn config_dir() -> PathBuf {
+    base_dir_from_env(
+        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+        dirs::home_dir(),
+        &[".config"],
+    )
+}
+
+pub fn state_dir() -> PathBuf {
+    base_dir_from_env(
+        std::env::var_os("XDG_STATE_HOME").map(PathBuf::from),
+        dirs::home_dir(),
+        &[".local", "state"],
+    )
+}
+
 /// Write a file with owner-only permissions (0o600) on Unix.
 /// The file is created with restricted permissions from the start so that
 /// sensitive state is never briefly world-readable.
@@ -216,12 +248,13 @@ fn default_log_level() -> String {
 }
 
 fn default_log_file() -> Option<String> {
-    dirs::state_dir().or_else(dirs::data_local_dir).map(|d| {
-        d.join("pw-env")
+    Some(
+        state_dir()
+            .join("pw-env")
             .join("pw-env.log")
             .to_string_lossy()
-            .into_owned()
-    })
+            .into_owned(),
+    )
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -280,15 +313,7 @@ struct ReviewedMigrations {
 
 impl Config {
     pub fn config_path() -> PathBuf {
-        // Prefer XDG_CONFIG_HOME, then ~/.config (Unix convention for CLI tools)
-        if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-            return PathBuf::from(xdg).join("pw-env").join("config.toml");
-        }
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("~"))
-            .join(".config")
-            .join("pw-env")
-            .join("config.toml")
+        config_dir().join("pw-env").join("config.toml")
     }
 
     pub fn load() -> Result<Self> {
@@ -765,9 +790,11 @@ impl ApprovedProjectConfigs {
         if let Some(p) = TEST_APPROVAL_STORE_PATH.with(|v| v.borrow().clone()) {
             return Some(p);
         }
-        dirs::state_dir()
-            .or_else(dirs::data_local_dir)
-            .map(|dir| dir.join("pw-env").join("approved-project-configs.json"))
+        Some(
+            state_dir()
+                .join("pw-env")
+                .join("approved-project-configs.json"),
+        )
     }
 }
 
@@ -906,9 +933,11 @@ impl ApprovedSecretFetches {
         if let Some(p) = TEST_SECRET_FETCH_STORE_PATH.with(|v| v.borrow().clone()) {
             return Some(p);
         }
-        dirs::state_dir()
-            .or_else(dirs::data_local_dir)
-            .map(|dir| dir.join("pw-env").join("approved-secret-fetches.json"))
+        Some(
+            state_dir()
+                .join("pw-env")
+                .join("approved-secret-fetches.json"),
+        )
     }
 }
 
@@ -1000,9 +1029,7 @@ impl ReviewedMigrations {
         if let Some(p) = TEST_REVIEWED_MIGRATIONS_PATH.with(|v| v.borrow().clone()) {
             return Some(p);
         }
-        dirs::state_dir()
-            .or_else(dirs::data_local_dir)
-            .map(|dir| dir.join("pw-env").join("reviewed-migrations.json"))
+        Some(state_dir().join("pw-env").join("reviewed-migrations.json"))
     }
 }
 
@@ -1663,6 +1690,33 @@ vault = "Work"
             s.ends_with("config.toml"),
             "path should end with config.toml"
         );
+    }
+
+    #[test]
+    fn base_dir_from_env_prefers_explicit_env_value() {
+        let path = base_dir_from_env(
+            Some(PathBuf::from("/tmp/xdg-state")),
+            Some(PathBuf::from("/tmp/home")),
+            &[".local", "state"],
+        );
+
+        assert_eq!(path, PathBuf::from("/tmp/xdg-state"));
+    }
+
+    #[test]
+    fn base_dir_from_env_uses_home_with_fallback_components() {
+        let path = base_dir_from_env(None, Some(PathBuf::from("/tmp/home")), &[".config"]);
+
+        assert_eq!(path, PathBuf::from("/tmp/home/.config"));
+    }
+
+    #[test]
+    fn state_dir_path_returns_local_state_location() {
+        let path = state_dir();
+        let display = path.to_string_lossy();
+
+        assert!(display.contains(".local") || display.contains("local"));
+        assert!(display.contains("state"));
     }
 
     #[test]

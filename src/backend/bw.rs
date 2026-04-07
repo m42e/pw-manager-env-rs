@@ -119,9 +119,11 @@ impl FolderIdCacheStore {
             return Some(path);
         }
 
-        dirs::state_dir()
-            .or_else(dirs::data_local_dir)
-            .map(|dir| dir.join("pw-env").join(FOLDER_ID_CACHE_FILE_NAME))
+        Some(
+            crate::config::state_dir()
+                .join("pw-env")
+                .join(FOLDER_ID_CACHE_FILE_NAME),
+        )
     }
 }
 
@@ -172,9 +174,11 @@ impl SyncStateStore {
             return Some(path);
         }
 
-        dirs::state_dir()
-            .or_else(dirs::data_local_dir)
-            .map(|dir| dir.join("pw-env").join(SYNC_STATE_FILE_NAME))
+        Some(
+            crate::config::state_dir()
+                .join("pw-env")
+                .join(SYNC_STATE_FILE_NAME),
+        )
     }
 }
 
