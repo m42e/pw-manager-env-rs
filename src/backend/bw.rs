@@ -216,9 +216,9 @@ impl BwBackend {
         let folders: serde_json::Value = serde_json::from_str(&folders_json)?;
         if let Some(folder_arr) = folders.as_array() {
             // --search is a fuzzy/substring match; find the exact name match
-            let exact = folder_arr.iter().find(|f| {
-                f.get("name").and_then(|n| n.as_str()) == Some(folder_name)
-            });
+            let exact = folder_arr
+                .iter()
+                .find(|f| f.get("name").and_then(|n| n.as_str()) == Some(folder_name));
             if let Some(folder) = exact
                 && let Some(id) = folder.get("id").and_then(|i| i.as_str())
             {
@@ -822,7 +822,8 @@ mod tests {
 
     #[test]
     fn backend_resolve_direct_password_lookup() {
-        let items_json = r#"[{"name":"MY_KEY","login":{"password":"direct-password"},"fields":[]}]"#;
+        let items_json =
+            r#"[{"name":"MY_KEY","login":{"password":"direct-password"},"fields":[]}]"#;
         let script = format!("#!/bin/sh\necho '{}'\n", items_json);
         with_mock_bw(&script, || {
             let config = Config {

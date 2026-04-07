@@ -3,6 +3,7 @@ mod config;
 mod env_file;
 mod migrate;
 mod output;
+mod progress;
 mod release;
 mod resolve;
 mod shell;

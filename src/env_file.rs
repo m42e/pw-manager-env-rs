@@ -838,7 +838,8 @@ mod tests {
 
     #[test]
     fn test_export_prefix_in_full_parse() {
-        let path = write_test_env("export DB_HOST=localhost\nexport DB_PASS=op://vault/item/pass\n");
+        let path =
+            write_test_env("export DB_HOST=localhost\nexport DB_PASS=op://vault/item/pass\n");
         let env_file = EnvFile::parse(&path).expect("parse should succeed");
         std::fs::remove_file(&path).expect("temp file should be removable");
 

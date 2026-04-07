@@ -6,6 +6,7 @@ use tracing::{debug, info, warn};
 use crate::backend::{self, ResolveContext};
 use crate::config::Config;
 use crate::env_file::{EntryKind, EnvEntry, EnvFile};
+use crate::progress::ActivitySpinner;
 
 /// Walk up from `dir` to find a `.git` directory, returning the containing folder.
 fn find_git_root(dir: &Path) -> Option<PathBuf> {
@@ -150,13 +151,27 @@ pub fn resolve_env_file(
             config,
             project: project.clone(),
         };
-        for entry in &bw_entries {
+        for (idx, entry) in bw_entries.iter().enumerate() {
             let reference = match &entry.kind {
                 EntryKind::BwReference(r) => Some(r.as_str()),
                 _ => None,
             };
+            let step_label = format!(
+                "Bitwarden: resolving {} ({}/{})",
+                entry.key,
+                idx + 1,
+                bw_entries.len()
+            );
+            let mut spinner = ActivitySpinner::new(step_label.clone());
+            spinner.set_message(step_label);
             match backend.resolve(&entry.key, reference, &ctx) {
                 Ok(value) => {
+                    spinner.finish(format!(
+                        "Bitwarden: resolved {} ({}/{})",
+                        entry.key,
+                        idx + 1,
+                        bw_entries.len()
+                    ));
                     info!("Resolved {} via Bitwarden", entry.key);
                     log_credential_fetch_audit(
                         &env_file.path,
@@ -168,6 +183,12 @@ pub fn resolve_env_file(
                     resolved.insert(entry.key.clone(), value);
                 }
                 Err(e) => {
+                    spinner.fail(format!(
+                        "Bitwarden: failed {} ({}/{})",
+                        entry.key,
+                        idx + 1,
+                        bw_entries.len()
+                    ));
                     warn!("Failed to resolve {} via Bitwarden: {e}", entry.key);
                 }
             }
