@@ -8,8 +8,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, trace, warn};
 
 use super::{
-    Backend, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME, REPOSITORY_FIELD_NAME, ResolveContext,
-    StoreContext,
+    Backend, CREATED_WITH_FIELD_NAME, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME,
+    REPOSITORY_FIELD_NAME, ResolveContext, StoreContext,
 };
 
 /// Cached BW_SESSION key. `None` means not yet determined.
@@ -283,11 +283,18 @@ impl BwBackend {
     }
 
     fn migration_metadata_fields(ctx: &StoreContext) -> Vec<serde_json::Value> {
-        let mut fields = vec![serde_json::json!({
-            "name": MIGRATED_FROM_FIELD_NAME,
-            "value": ctx.migrated_from(),
-            "type": 0
-        })];
+        let mut fields = vec![
+            serde_json::json!({
+                "name": MIGRATED_FROM_FIELD_NAME,
+                "value": ctx.migrated_from(),
+                "type": 0
+            }),
+            serde_json::json!({
+                "name": CREATED_WITH_FIELD_NAME,
+                "value": ctx.created_with(),
+                "type": 0
+            }),
+        ];
         if let Some(project) = ctx.project.as_deref() {
             fields.push(serde_json::json!({
                 "name": PROJECT_FIELD_NAME,
@@ -2136,6 +2143,11 @@ mod tests {
             field.get("name").and_then(|value| value.as_str()) == Some("migrated_from")
                 && field.get("value").and_then(|value| value.as_str())
                     == Some("/tmp/example/service")
+        }));
+        assert!(fields.iter().any(|field| {
+            field.get("name").and_then(|value| value.as_str()) == Some("created-with")
+                && field.get("value").and_then(|value| value.as_str())
+                    == Some(&format!("pw-env ({})", env!("CARGO_PKG_VERSION")))
         }));
         assert!(fields.iter().any(|field| {
             field.get("name").and_then(|value| value.as_str()) == Some("project")

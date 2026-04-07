@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use std::process::Command;
 use tracing::debug;
 
-use super::{Backend, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME, ResolveContext, StoreContext};
+use super::{
+    Backend, CREATED_WITH_FIELD_NAME, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME, ResolveContext,
+    StoreContext,
+};
 
 pub struct GpgBackend;
 
@@ -13,6 +16,7 @@ struct StoredSecret {
     value: String,
     project: Option<String>,
     migrated_from: Option<String>,
+    created_with: Option<String>,
 }
 
 impl GpgBackend {
@@ -48,6 +52,7 @@ impl GpgBackend {
         let mut map = BTreeMap::new();
         let mut pending_project: Option<String> = None;
         let mut pending_migrated_from: Option<String> = None;
+        let mut pending_created_with: Option<String> = None;
 
         for line in content.lines() {
             let line = line.trim();
@@ -59,6 +64,9 @@ impl GpgBackend {
                         PROJECT_FIELD_NAME => pending_project = Some(value.trim().to_string()),
                         MIGRATED_FROM_FIELD_NAME => {
                             pending_migrated_from = Some(value.trim().to_string())
+                        }
+                        CREATED_WITH_FIELD_NAME => {
+                            pending_created_with = Some(value.trim().to_string())
                         }
                         _ => {}
                     }
@@ -86,12 +94,14 @@ impl GpgBackend {
                             value: value.to_string(),
                             project: pending_project.take(),
                             migrated_from: pending_migrated_from.take(),
+                            created_with: pending_created_with.take(),
                         },
                     );
                 }
             } else {
                 pending_project = None;
                 pending_migrated_from = None;
+                pending_created_with = None;
             }
         }
         map
@@ -158,6 +168,13 @@ impl GpgBackend {
                 content.push_str(&Self::metadata_comment(
                     MIGRATED_FROM_FIELD_NAME,
                     migrated_from,
+                ));
+                content.push('\n');
+            }
+            if let Some(created_with) = secret.created_with.as_deref() {
+                content.push_str(&Self::metadata_comment(
+                    CREATED_WITH_FIELD_NAME,
+                    created_with,
                 ));
                 content.push('\n');
             }
@@ -235,6 +252,7 @@ impl Backend for GpgBackend {
                 value: value.to_string(),
                 project: ctx.project.clone(),
                 migrated_from: Some(ctx.migrated_from()),
+                created_with: Some(ctx.created_with()),
             },
         );
 
@@ -282,6 +300,7 @@ mod tests {
         let foo = stored.get("FOO").unwrap();
         assert_eq!(foo.project, None);
         assert_eq!(foo.migrated_from, None);
+        assert_eq!(foo.created_with, None);
     }
 
     #[test]
@@ -314,6 +333,7 @@ mod tests {
                 value: "plain_value".to_string(),
                 project: None,
                 migrated_from: None,
+                created_with: None,
             },
         );
         let serialized = GpgBackend::serialize_stored_secrets(&stored);
@@ -380,6 +400,7 @@ SPACED_KEY = spaced_value
         let content = r#"
 # pw-env: project=service-a
 # pw-env: migrated_from=/tmp/work/service-a
+# pw-env: created-with=pw-env (0.0.0)
 API_KEY=secret
 PLAIN=value
 "#;
@@ -394,6 +415,10 @@ PLAIN=value
             stored.get("API_KEY").unwrap().migrated_from.as_deref(),
             Some("/tmp/work/service-a")
         );
+        assert_eq!(
+            stored.get("API_KEY").unwrap().created_with.as_deref(),
+            Some("pw-env (0.0.0)")
+        );
         assert_eq!(stored.get("PLAIN").unwrap().project, None);
     }
 
@@ -406,6 +431,7 @@ PLAIN=value
                 value: "secret".to_string(),
                 project: Some("service-a".to_string()),
                 migrated_from: Some("/tmp/work/service-a".to_string()),
+                created_with: Some(format!("pw-env ({})", env!("CARGO_PKG_VERSION"))),
             },
         );
 
@@ -413,6 +439,10 @@ PLAIN=value
 
         assert!(serialized.contains("# pw-env: project=service-a"));
         assert!(serialized.contains("# pw-env: migrated_from=/tmp/work/service-a"));
+        assert!(serialized.contains(&format!(
+            "# pw-env: created-with=pw-env ({})",
+            env!("CARGO_PKG_VERSION")
+        )));
         assert!(serialized.contains("API_KEY=secret"));
     }
 

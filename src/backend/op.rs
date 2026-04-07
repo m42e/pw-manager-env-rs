@@ -3,8 +3,8 @@ use std::process::Command;
 use tracing::{debug, info, warn};
 
 use super::{
-    Backend, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME, REPOSITORY_FIELD_NAME, ResolveContext,
-    StoreContext,
+    Backend, CREATED_WITH_FIELD_NAME, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME,
+    REPOSITORY_FIELD_NAME, ResolveContext, StoreContext,
 };
 
 pub struct OpBackend;
@@ -15,10 +15,10 @@ impl OpBackend {
     }
 
     fn migration_field_assignments(ctx: &StoreContext) -> Vec<String> {
-        let mut assignments = vec![Self::text_field_assignment(
-            MIGRATED_FROM_FIELD_NAME,
-            &ctx.migrated_from(),
-        )];
+        let mut assignments = vec![
+            Self::text_field_assignment(MIGRATED_FROM_FIELD_NAME, &ctx.migrated_from()),
+            Self::text_field_assignment(CREATED_WITH_FIELD_NAME, &ctx.created_with()),
+        ];
         if let Some(project) = ctx.project.as_deref() {
             assignments.push(Self::text_field_assignment(PROJECT_FIELD_NAME, project));
         }
@@ -341,6 +341,10 @@ mod tests {
         };
         let assignments = OpBackend::migration_field_assignments(&ctx);
         assert!(assignments.contains(&"migrated_from[text]=/work/project".to_string()));
+        assert!(assignments.contains(&format!(
+            "created-with[text]=pw-env ({})",
+            env!("CARGO_PKG_VERSION")
+        )));
         assert!(assignments.contains(&"project[text]=my-project".to_string()));
     }
 
@@ -360,7 +364,11 @@ mod tests {
         };
         let assignments = OpBackend::migration_field_assignments(&ctx);
         assert!(assignments.contains(&"migrated_from[text]=/work/project".to_string()));
-        assert_eq!(assignments.len(), 1);
+        assert!(assignments.contains(&format!(
+            "created-with[text]=pw-env ({})",
+            env!("CARGO_PKG_VERSION")
+        )));
+        assert_eq!(assignments.len(), 2);
     }
 
     #[test]
@@ -381,6 +389,10 @@ mod tests {
         let assignments = OpBackend::migration_field_assignments(&ctx);
 
         assert!(assignments.contains(&"migrated_from[text]=/tmp/example/service".to_string()));
+        assert!(assignments.contains(&format!(
+            "created-with[text]=pw-env ({})",
+            env!("CARGO_PKG_VERSION")
+        )));
         assert!(assignments.contains(&"project[text]=example".to_string()));
         assert!(
             assignments

@@ -7,6 +7,7 @@ use std::path::Path;
 
 use crate::config::Config;
 
+pub const CREATED_WITH_FIELD_NAME: &str = "created-with";
 pub const PROJECT_FIELD_NAME: &str = "project";
 pub const MIGRATED_FROM_FIELD_NAME: &str = "migrated_from";
 pub const REPOSITORY_FIELD_NAME: &str = "repository";
@@ -37,6 +38,10 @@ pub struct StoreContext<'a> {
 }
 
 impl StoreContext<'_> {
+    pub fn created_with(&self) -> String {
+        format!("pw-env ({})", env!("CARGO_PKG_VERSION"))
+    }
+
     pub fn migrated_from(&self) -> String {
         self.dir.display().to_string()
     }
@@ -119,5 +124,20 @@ mod tests {
             repository: None,
         };
         assert_eq!(ctx.migrated_from(), "/some/project/dir");
+    }
+
+    #[test]
+    fn test_store_context_created_with() {
+        let config = make_config();
+        let ctx = StoreContext {
+            dir: std::path::Path::new("/some/project/dir"),
+            config: &config,
+            project: None,
+            repository: None,
+        };
+        assert_eq!(
+            ctx.created_with(),
+            format!("pw-env ({})", env!("CARGO_PKG_VERSION"))
+        );
     }
 }
