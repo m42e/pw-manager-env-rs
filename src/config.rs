@@ -570,18 +570,23 @@ impl Config {
 
     /// Find a project override matching the given directory (exact match or parent match).
     pub fn project_for(&self, dir: &Path) -> Option<&ProjectOverride> {
-        self.projects
-            .iter()
-            .filter_map(|project| {
-                let project_path = normalized_project_path(&project.path);
-                if dir.starts_with(&project_path) {
-                    Some((project_path.components().count(), project))
-                } else {
-                    None
-                }
-            })
-            .max_by_key(|(depth, _)| *depth)
-            .map(|(_, project)| project)
+        self.project_index_for(dir)
+            .map(|index| &self.projects[index])
+    }
+
+    pub fn with_backend_override_for_dir(&self, dir: &Path, backend: Option<&str>) -> Self {
+        let Some(backend) = backend else {
+            return self.clone();
+        };
+
+        let mut config = self.clone();
+        if let Some(index) = config.project_index_for(dir) {
+            config.projects[index].backend = Some(backend.to_string());
+        } else {
+            config.defaults.backend = backend.to_string();
+        }
+
+        config
     }
 
     /// Resolve the effective backend name for a given directory.
@@ -632,6 +637,22 @@ impl Config {
         self.project_for(dir)
             .map(|project| project.commands.as_slice())
             .unwrap_or(&[])
+    }
+
+    fn project_index_for(&self, dir: &Path) -> Option<usize> {
+        self.projects
+            .iter()
+            .enumerate()
+            .filter_map(|(index, project)| {
+                let project_path = normalized_project_path(&project.path);
+                if dir.starts_with(&project_path) {
+                    Some((project_path.components().count(), index))
+                } else {
+                    None
+                }
+            })
+            .max_by_key(|(depth, _)| *depth)
+            .map(|(_, index)| index)
     }
 }
 

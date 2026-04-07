@@ -15,24 +15,26 @@ pub fn add_entry(
     config: &Config,
     key: &str,
     provided_value: Option<String>,
+    backend_override: Option<&str>,
 ) -> Result<()> {
     validate_key(key)?;
 
     let env_update = plan_env_entry_update(dir, key)?;
     let value = read_secret_value(key, provided_value)?;
-    let backend_name = config.effective_backend(dir);
+    let effective_config = config.with_backend_override_for_dir(dir, backend_override);
+    let backend_name = effective_config.effective_backend(dir);
     let backend = backend::create_backend(backend_name)?;
     let project = resolve::detect_project_name(dir);
     let repository = resolve::detect_repository_remote(dir);
     let store_ctx = StoreContext {
         dir,
-        config,
+        config: &effective_config,
         project: project.clone(),
         repository: repository.clone(),
     };
     let resolve_ctx = ResolveContext {
         dir,
-        config,
+        config: &effective_config,
         project,
         repository,
     };
@@ -187,7 +189,7 @@ fn apply_env_entry_update(update: EnvEntryUpdate, key: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, Defaults, GpgConfig, LogConfig, UpdateConfig};
+    use crate::config::{Config, Defaults, GpgConfig, LogConfig, OpConfig, UpdateConfig};
     use tempfile::TempDir;
 
     #[test]
@@ -303,6 +305,7 @@ mod tests {
             &config,
             "API_KEY",
             Some("super-secret".to_string()),
+            None,
         );
 
         unsafe { std::env::set_var("PATH", &old_path) };
@@ -316,5 +319,71 @@ mod tests {
 
         let encrypted_payload = std::fs::read_to_string(gpg_output_path).unwrap();
         assert!(encrypted_payload.contains("API_KEY=super-secret"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn add_entry_backend_override_uses_matching_backend_item_config() {
+        let _guard = crate::backend::MOCK_PATH_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_dir = TempDir::new().unwrap();
+        let bin_dir = TempDir::new().unwrap();
+        let op_path = bin_dir.path().join("op");
+        let op_log_path = temp_dir.path().join("op-invocation.txt");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\n' \"$*\" > '{}'\nif [ \"$1\" = \"item\" ] && [ \"$2\" = \"edit\" ] && [ \"$3\" = \"shared-item\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"item\" ] && [ \"$2\" = \"get\" ] && [ \"$3\" = \"shared-item\" ] && [ \"$4\" = \"--fields\" ] && [ \"$5\" = \"label=API_KEY\" ] && [ \"$6\" = \"--reveal\" ]; then\n  printf 'super-secret'\n  exit 0\nfi\nprintf 'unexpected args: %s\n' \"$*\" >&2\nexit 1\n",
+            op_log_path.display()
+        );
+
+        std::fs::write(&op_path, script).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&op_path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&op_path, permissions).unwrap();
+        }
+
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let new_path = std::env::join_paths(
+            std::iter::once(bin_dir.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
+        )
+        .unwrap();
+        unsafe { std::env::set_var("PATH", &new_path) };
+
+        let config = Config {
+            defaults: Defaults {
+                backend: "bw".to_string(),
+                op: OpConfig {
+                    item: Some("shared-item".to_string()),
+                    ..OpConfig::default()
+                },
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        let result = add_entry(
+            temp_dir.path(),
+            &config,
+            "API_KEY",
+            Some("super-secret".to_string()),
+            Some("op"),
+        );
+
+        unsafe { std::env::set_var("PATH", &old_path) };
+
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        assert_eq!(
+            std::fs::read_to_string(temp_dir.path().join(".env")).unwrap(),
+            "API_KEY=\n"
+        );
+        let logged_args = std::fs::read_to_string(op_log_path).unwrap();
+        assert!(
+            logged_args.starts_with("item get shared-item --fields label=API_KEY --reveal"),
+            "unexpected op args: {logged_args}"
+        );
     }
 }

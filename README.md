@@ -394,7 +394,8 @@ Main subcommands:
 - `pw-env export [dir] --shell <bash|zsh|fish>` prints resolved exports for shell evaluation
 - `pw-env load [dir]` prints a human-readable resolution summary and masked export statements; pass `--reveal` to show
   full values
-- `pw-env add [--dir <dir>] <KEY> [VALUE]` stores a secret in the configured backend and ensures `.env` contains
+- `pw-env add [--dir <dir>] [--backend <op|bw|gpg>] <KEY> [VALUE]` stores a secret in the configured backend, or a
+  backend chosen for that invocation, and ensures `.env` contains
   `KEY=` for runtime resolution; omit `VALUE` to prompt or read it from stdin
 - `pw-env migrate [dir]` interactively stores plaintext `.env` values in the configured backend and clears them from
   `.env`; entries marked with `no-migrate` are skipped

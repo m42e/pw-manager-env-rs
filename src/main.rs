@@ -76,6 +76,9 @@ enum Commands {
         /// Directory containing or receiving the .env file (defaults to current directory)
         #[arg(long)]
         dir: Option<PathBuf>,
+        /// Backend to use for this add operation: op, bw, or gpg
+        #[arg(long, value_parser = ["op", "bw", "gpg"])]
+        backend: Option<String>,
         /// Environment variable key to add
         key: String,
         /// Secret value to store. If omitted, pw-env prompts or reads from stdin.
@@ -407,10 +410,15 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
             Ok(())
         }
 
-        Commands::Add { dir, key, value } => {
+        Commands::Add {
+            dir,
+            backend,
+            key,
+            value,
+        } => {
             let dir = resolve_dir(dir)?;
             let config = config::Config::load_for_dir(&dir)?;
-            add::add_entry(&dir, &config, &key, value)
+            add::add_entry(&dir, &config, &key, value, backend.as_deref())
         }
 
         Commands::Migrate { dir } => {

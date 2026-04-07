@@ -10,7 +10,7 @@
 | `exec` | Run a command with resolved secrets only in the child process |
 | `export` | Print shell exports for the current project |
 | `load` | Show a human-readable view of the current resolution state |
-| `add` | Store a secret in the effective backend and ensure `.env` contains `KEY=` |
+| `add` | Store a secret in the effective backend, or a backend chosen by flag, and ensure `.env` contains `KEY=` |
 | `migrate` | Move plaintext values into the configured backend |
 | `check` | Verify backend binaries and config discovery |
 | `approvals` | Manage local override and secret-fetch approvals |
@@ -69,11 +69,14 @@ when you need to debug what pw-env would do without wiring it into a shell.
 ## `add`
 
 ```console
-pw-env add [--dir <DIR>] <KEY> [VALUE]
+pw-env add [--dir <DIR>] [--backend <BACKEND>] <KEY> [VALUE]
 ```
 
 Store a secret in the effective backend for the selected directory, then ensure the local `.env` contains an empty
 entry for that key so future resolution can load it through the default backend.
+
+Pass `--backend op`, `--backend bw`, or `--backend gpg` to store the secret in a specific backend for this command
+without changing the configured default backend for later resolution.
 
 Pass `VALUE` directly when that is acceptable for your shell history and process list. If you omit it, `pw-env` reads
 the value from an interactive hidden prompt or from stdin when piped.
