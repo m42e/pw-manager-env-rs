@@ -221,6 +221,21 @@ try {
         Write-Output ""
         Write-Output "Add $installDir to PATH if it is not already available in your shell session."
     }
+
+    Write-Output ""
+    Write-Output "To enable the pw-env shell hook, add the following to your shell config:"
+    Write-Output ""
+    if ($IsWindows) {
+        Write-Output '  Invoke-Expression (& pw-env init powershell)'
+        Write-Output ""
+        Write-Output "  Add the line above to your PowerShell profile (`$PROFILE)."
+    }
+    else {
+        Write-Output '  bash:  eval "$(pw-env init bash)"  # add to ~/.bashrc'
+        Write-Output '  zsh:   eval "$(pw-env init zsh)"   # add to ~/.zshrc'
+        Write-Output '  fish:  pw-env init fish | source   # add to ~/.config/fish/config.fish'
+        Write-Output '  pwsh:  Invoke-Expression (& pw-env init powershell)  # add to $PROFILE'
+    }
 }
 finally {
     if (Test-Path -LiteralPath $tmpDir) {
