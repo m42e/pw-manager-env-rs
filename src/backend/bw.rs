@@ -1,6 +1,10 @@
 use anyhow::{Context, Result, bail};
-use std::process::Command;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 use std::sync::Mutex;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, trace, warn};
 
 use super::{Backend, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME, ResolveContext, StoreContext};
@@ -8,9 +12,269 @@ use super::{Backend, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME, ResolveContex
 /// Cached BW_SESSION key. `None` means not yet determined.
 static SESSION: Mutex<Option<String>> = Mutex::new(None);
 
+/// Cached folder name → UUID mappings (non-secret metadata).
+static FOLDER_ID_CACHE: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+static SYNC_THROTTLE_OVERRIDE_SECS: Mutex<Option<u64>> = Mutex::new(None);
+
+const FOLDER_ID_CACHE_FILE_NAME: &str = "bitwarden-folder-ids.json";
+const SYNC_STATE_FILE_NAME: &str = "bitwarden-sync-state.json";
+const MIN_SYNC_THROTTLE_SECS: u64 = 3600;
+const DEFAULT_SYNC_THROTTLE_SECS: u64 = MIN_SYNC_THROTTLE_SECS;
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct FolderIdCacheStore {
+    #[serde(default)]
+    folder_ids: HashMap<String, String>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct SyncStateStore {
+    last_sync_unix_secs: Option<u64>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_FOLDER_CACHE_PATH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    static TEST_SYNC_STATE_PATH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Write a file with owner-only permissions (0o600) on Unix.
+fn write_private_file(path: &Path, contents: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("Failed to create {}", path.display()))?;
+        file.write_all(contents.as_bytes())
+            .with_context(|| format!("Failed to write {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)
+            .with_context(|| format!("Failed to write {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+impl FolderIdCacheStore {
+    fn load() -> Result<Self> {
+        let Some(path) = Self::path() else {
+            return Ok(Self::default());
+        };
+
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+
+        let contents = std::fs::read_to_string(&path).with_context(|| {
+            format!(
+                "Failed to read Bitwarden folder cache from {}",
+                path.display()
+            )
+        })?;
+        serde_json::from_str(&contents).with_context(|| {
+            format!(
+                "Failed to parse Bitwarden folder cache from {}",
+                path.display()
+            )
+        })
+    }
+
+    fn save(&self) -> Result<()> {
+        let Some(path) = Self::path() else {
+            return Ok(());
+        };
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create state directory {}", parent.display())
+            })?;
+        }
+
+        let contents = serde_json::to_string_pretty(self)
+            .context("Failed to serialize Bitwarden folder cache")?;
+        write_private_file(&path, &contents).with_context(|| {
+            format!(
+                "Failed to write Bitwarden folder cache to {}",
+                path.display()
+            )
+        })
+    }
+
+    fn path() -> Option<PathBuf> {
+        #[cfg(test)]
+        if let Some(path) = TEST_FOLDER_CACHE_PATH.with(|value| value.borrow().clone()) {
+            return Some(path);
+        }
+
+        dirs::state_dir()
+            .or_else(dirs::data_local_dir)
+            .map(|dir| dir.join("pw-env").join(FOLDER_ID_CACHE_FILE_NAME))
+    }
+}
+
+impl SyncStateStore {
+    fn load() -> Result<Self> {
+        let Some(path) = Self::path() else {
+            return Ok(Self::default());
+        };
+
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+
+        let contents = std::fs::read_to_string(&path).with_context(|| {
+            format!(
+                "Failed to read Bitwarden sync state from {}",
+                path.display()
+            )
+        })?;
+        serde_json::from_str(&contents).with_context(|| {
+            format!(
+                "Failed to parse Bitwarden sync state from {}",
+                path.display()
+            )
+        })
+    }
+
+    fn save(&self) -> Result<()> {
+        let Some(path) = Self::path() else {
+            return Ok(());
+        };
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create state directory {}", parent.display())
+            })?;
+        }
+
+        let contents = serde_json::to_string_pretty(self)
+            .context("Failed to serialize Bitwarden sync state")?;
+        write_private_file(&path, &contents)
+            .with_context(|| format!("Failed to write Bitwarden sync state to {}", path.display()))
+    }
+
+    fn path() -> Option<PathBuf> {
+        #[cfg(test)]
+        if let Some(path) = TEST_SYNC_STATE_PATH.with(|value| value.borrow().clone()) {
+            return Some(path);
+        }
+
+        dirs::state_dir()
+            .or_else(dirs::data_local_dir)
+            .map(|dir| dir.join("pw-env").join(SYNC_STATE_FILE_NAME))
+    }
+}
+
 pub struct BwBackend;
 
 impl BwBackend {
+    fn effective_sync_throttle_secs() -> u64 {
+        SYNC_THROTTLE_OVERRIDE_SECS
+            .lock()
+            .unwrap()
+            .unwrap_or(DEFAULT_SYNC_THROTTLE_SECS)
+            .max(MIN_SYNC_THROTTLE_SECS)
+    }
+
+    fn configure_sync_throttle(sync_throttle_secs: u64) {
+        *SYNC_THROTTLE_OVERRIDE_SECS.lock().unwrap() = Some(sync_throttle_secs);
+    }
+
+    fn should_retry_after_sync(error: &anyhow::Error) -> bool {
+        let message = error.to_string().to_ascii_lowercase();
+        message.contains("no bitwarden items found")
+            || message.contains("field '") && message.contains("not found in bitwarden item")
+            || message.contains("failed to fetch bitwarden item")
+            || message.contains("failed to list bitwarden items")
+            || message.contains("object not found")
+    }
+
+    fn current_unix_secs() -> Option<u64> {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_secs())
+    }
+
+    fn log_action_timing(action: &str, started_at: Instant, success: bool) {
+        debug!(
+            action,
+            duration_ms = started_at.elapsed().as_millis(),
+            success,
+            "Bitwarden action finished"
+        );
+    }
+
+    fn run_timed_command(mut cmd: Command, action: &str, exec_context: &str) -> Result<Output> {
+        let started_at = Instant::now();
+        match cmd.output() {
+            Ok(output) => {
+                Self::log_action_timing(action, started_at, output.status.success());
+                Ok(output)
+            }
+            Err(error) => {
+                Self::log_action_timing(action, started_at, false);
+                Err(error).context(exec_context.to_string())
+            }
+        }
+    }
+
+    pub fn folder_cache_path() -> Option<PathBuf> {
+        FolderIdCacheStore::path()
+    }
+
+    pub fn sync_state_path() -> Option<PathBuf> {
+        SyncStateStore::path()
+    }
+
+    pub fn clear_folder_cache() -> Result<bool> {
+        *FOLDER_ID_CACHE.lock().unwrap() = None;
+
+        let Some(path) = FolderIdCacheStore::path() else {
+            return Ok(false);
+        };
+
+        if !path.exists() {
+            return Ok(false);
+        }
+
+        std::fs::remove_file(&path).with_context(|| {
+            format!(
+                "Failed to remove Bitwarden folder cache at {}",
+                path.display()
+            )
+        })?;
+        Ok(true)
+    }
+
+    pub fn clear_sync_state() -> Result<bool> {
+        let Some(path) = SyncStateStore::path() else {
+            return Ok(false);
+        };
+
+        if !path.exists() {
+            return Ok(false);
+        }
+
+        std::fs::remove_file(&path).with_context(|| {
+            format!(
+                "Failed to remove Bitwarden sync state at {}",
+                path.display()
+            )
+        })?;
+        Ok(true)
+    }
+
     fn migration_metadata_fields(ctx: &StoreContext) -> Vec<serde_json::Value> {
         let mut fields = vec![serde_json::json!({
             "name": MIGRATED_FROM_FIELD_NAME,
@@ -91,9 +355,11 @@ impl BwBackend {
             let mut cmd = Command::new("bw");
             cmd.arg("status");
             cmd.stdin(std::process::Stdio::null());
-            let output = cmd
-                .output()
-                .context("Failed to execute `bw` CLI. Is Bitwarden CLI installed?")?;
+            let output = Self::run_timed_command(
+                cmd,
+                "bw status",
+                "Failed to execute `bw` CLI. Is Bitwarden CLI installed?",
+            )?;
             String::from_utf8(output.stdout).context("bw output was not valid UTF-8")?
         };
 
@@ -134,9 +400,53 @@ impl BwBackend {
     /// Logs a warning on failure but does not abort — a stale cache is
     /// better than blocking the entire workflow.
     fn sync_vault() {
+        Self::sync_vault_with_mode(false);
+    }
+
+    fn force_sync_vault() {
+        Self::sync_vault_with_mode(true);
+    }
+
+    fn sync_vault_with_mode(force: bool) {
+        let sync_throttle_secs = Self::effective_sync_throttle_secs();
+        if !force {
+            match SyncStateStore::load() {
+                Ok(state) => {
+                    if let (Some(last_sync), Some(now)) =
+                        (state.last_sync_unix_secs, Self::current_unix_secs())
+                    {
+                        let age_secs = now.saturating_sub(last_sync);
+                        if age_secs < sync_throttle_secs {
+                            debug!(
+                                age_secs,
+                                throttle_secs = sync_throttle_secs,
+                                "Skipping Bitwarden sync because the last successful sync was recent"
+                            );
+                            return;
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!("Failed to load Bitwarden sync state (continuing with sync): {error}");
+                }
+            }
+        } else {
+            debug!("Forcing Bitwarden sync after lookup failure");
+        }
+
         debug!("Syncing Bitwarden vault");
         match Self::run_bw(&["sync"]) {
-            Ok(_) => info!("Bitwarden vault synced"),
+            Ok(_) => {
+                info!("Bitwarden vault synced");
+                if let Some(now) = Self::current_unix_secs()
+                    && let Err(error) = (SyncStateStore {
+                        last_sync_unix_secs: Some(now),
+                    })
+                    .save()
+                {
+                    warn!("Failed to persist Bitwarden sync state (continuing): {error}");
+                }
+            }
             Err(e) => warn!("Bitwarden sync failed (continuing with local cache): {e}"),
         }
     }
@@ -165,14 +475,17 @@ impl BwBackend {
             .context("Failed to read master password")?;
 
         debug!("Running: bw unlock --raw --passwordenv ...");
-        let output = Command::new("bw")
-            .args(["unlock", "--raw", "--passwordenv", "BW_MASTER_PW"])
+        let mut cmd = Command::new("bw");
+        cmd.args(["unlock", "--raw", "--passwordenv", "BW_MASTER_PW"])
             .env("BW_MASTER_PW", &password)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .context("Failed to run `bw unlock`")?;
+            .stderr(std::process::Stdio::piped());
+        let output = Self::run_timed_command(
+            cmd,
+            "bw unlock --raw --passwordenv",
+            "Failed to run `bw unlock`",
+        )?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -209,8 +522,36 @@ impl BwBackend {
             || lower.contains("not logged in")
     }
 
-    /// Resolve a Bitwarden folder name to its UUID.
+    /// Resolve a Bitwarden folder name to its UUID, using an in-process cache.
     fn resolve_folder_id(folder_name: &str) -> Result<Option<String>> {
+        {
+            let mut guard = FOLDER_ID_CACHE.lock().unwrap();
+            if guard.is_none() {
+                match FolderIdCacheStore::load() {
+                    Ok(store) => {
+                        let len = store.folder_ids.len();
+                        if len > 0 {
+                            debug!(entry_count = len, "Loaded persisted Bitwarden folder cache");
+                        }
+                        *guard = Some(store.folder_ids);
+                    }
+                    Err(error) => {
+                        warn!(
+                            "Failed to load Bitwarden folder cache (continuing without cache): {error}"
+                        );
+                        *guard = Some(HashMap::new());
+                    }
+                }
+            }
+
+            if let Some(cache) = guard.as_ref()
+                && let Some(id) = cache.get(folder_name)
+            {
+                trace!(folder_name, folder_id = %id, "Folder ID cache hit");
+                return Ok(Some(id.clone()));
+            }
+        }
+
         debug!(folder_name, "Looking up Bitwarden folder ID");
         let folders_json = Self::run_bw(&["list", "folders", "--search", folder_name])?;
         let folders: serde_json::Value = serde_json::from_str(&folders_json)?;
@@ -223,6 +564,19 @@ impl BwBackend {
                 && let Some(id) = folder.get("id").and_then(|i| i.as_str())
             {
                 debug!(folder_name, folder_id = %id, "Resolved Bitwarden folder");
+
+                let mut guard = FOLDER_ID_CACHE.lock().unwrap();
+                let cache = guard.get_or_insert_with(HashMap::new);
+                cache.insert(folder_name.to_string(), id.to_string());
+
+                if let Err(error) = (FolderIdCacheStore {
+                    folder_ids: cache.clone(),
+                })
+                .save()
+                {
+                    warn!("Failed to persist Bitwarden folder cache (continuing): {error}");
+                }
+
                 return Ok(Some(id.to_string()));
             }
         }
@@ -230,14 +584,42 @@ impl BwBackend {
         Ok(None)
     }
 
+    /// Invalidate the folder ID cache (used in tests).
+    #[cfg(test)]
+    fn invalidate_folder_cache() {
+        *FOLDER_ID_CACHE.lock().unwrap() = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_folder_cache_path(path: Option<PathBuf>) {
+        TEST_FOLDER_CACHE_PATH.with(|value| {
+            *value.borrow_mut() = path;
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_sync_state_path(path: Option<PathBuf>) {
+        TEST_SYNC_STATE_PATH.with(|value| {
+            *value.borrow_mut() = path;
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_sync_throttle_override(sync_throttle_secs: Option<u64>) {
+        *SYNC_THROTTLE_OVERRIDE_SECS.lock().unwrap() = sync_throttle_secs;
+    }
+
     fn run_bw(args: &[&str]) -> Result<String> {
         let mut cmd = Self::bw_command()?;
         cmd.args(args);
         cmd.stdin(std::process::Stdio::null());
-        debug!("Running: bw {}", args.join(" "));
-        let output = cmd
-            .output()
-            .context("Failed to execute `bw` CLI. Is Bitwarden CLI installed?")?;
+        let action = format!("bw {}", args.join(" "));
+        debug!("Running: {}", action);
+        let output = Self::run_timed_command(
+            cmd,
+            &action,
+            "Failed to execute `bw` CLI. Is Bitwarden CLI installed?",
+        )?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             debug!(args = args.join(" "), %stderr, "bw command failed");
@@ -249,10 +631,13 @@ impl BwBackend {
                 let mut retry_cmd = Self::bw_command()?;
                 retry_cmd.args(args);
                 retry_cmd.stdin(std::process::Stdio::null());
-                debug!("Retrying: bw {}", args.join(" "));
-                let retry_output = retry_cmd
-                    .output()
-                    .context("Failed to execute `bw` CLI on retry")?;
+                debug!("Retrying: {}", action);
+                let retry_action = format!("{} (retry)", action);
+                let retry_output = Self::run_timed_command(
+                    retry_cmd,
+                    &retry_action,
+                    "Failed to execute `bw` CLI on retry",
+                )?;
                 if !retry_output.status.success() {
                     let retry_stderr = String::from_utf8_lossy(&retry_output.stderr);
                     bail!("bw command failed after re-auth: {retry_stderr}");
@@ -347,6 +732,17 @@ impl BwBackend {
         let items: Vec<serde_json::Value> =
             serde_json::from_str(&search_json).context("Failed to parse bw list items JSON")?;
 
+        Self::disambiguate_items_from_list(key, &items, folder_id, project)
+    }
+
+    /// Core disambiguation logic that works on a pre-fetched list of items.
+    /// Used by both the single-key `disambiguate_items` and the batch resolver.
+    fn disambiguate_items_from_list(
+        key: &str,
+        items: &[serde_json::Value],
+        folder_id: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<String> {
         debug!(
             key,
             item_count = items.len(),
@@ -438,10 +834,231 @@ impl BwBackend {
         );
         Ok(String::new())
     }
-}
 
-impl Backend for BwBackend {
-    fn resolve(&self, key: &str, reference: Option<&str>, ctx: &ResolveContext) -> Result<String> {
+    /// Batch-resolve multiple Bitwarden entries with minimal CLI calls.
+    ///
+    /// - **Item mode** (when `effective_item()` returns `Some`): a single `bw get item`
+    ///   call fetches the configured item, then all requested keys are extracted as
+    ///   custom fields from the cached JSON.
+    /// - **Item-per-key mode**: a single `bw list items` call (optionally filtered by
+    ///   `--folderid`) fetches all items, then each key is disambiguated in-process.
+    /// - **bw:// references**: grouped by item name so each unique item is fetched once.
+    ///
+    /// Returns a map of key → resolved value. Keys that fail to resolve are omitted
+    /// (the caller logs warnings per key).
+    pub fn resolve_batch(
+        keys: &[(&str, Option<&str>)],
+        ctx: &ResolveContext,
+    ) -> BTreeMap<String, Result<String>> {
+        Self::configure_sync_throttle(ctx.config.effective_bw(ctx.dir).sync_throttle_secs);
+        let started_at = Instant::now();
+        let mut retried_after_sync = false;
+
+        let mut results = Self::resolve_batch_once(keys, ctx);
+        if results
+            .values()
+            .filter_map(|result| result.as_ref().err())
+            .any(Self::should_retry_after_sync)
+        {
+            warn!(
+                "Bitwarden batch resolve failed for at least one lookup, forcing sync and retrying once"
+            );
+            Self::force_sync_vault();
+            results = Self::resolve_batch_once(keys, ctx);
+            retried_after_sync = true;
+        }
+
+        let success_count = results.values().filter(|result| result.is_ok()).count();
+        let failure_count = results.len().saturating_sub(success_count);
+        debug!(
+            duration_ms = started_at.elapsed().as_millis(),
+            total_entries = keys.len(),
+            success_count,
+            failure_count,
+            item_mode = ctx.config.effective_item(ctx.dir).is_some(),
+            retried_after_sync,
+            "Bitwarden batch resolve finished"
+        );
+
+        results
+    }
+
+    fn resolve_batch_once(
+        keys: &[(&str, Option<&str>)],
+        ctx: &ResolveContext,
+    ) -> BTreeMap<String, Result<String>> {
+        let bw_config = ctx.config.effective_bw(ctx.dir);
+        let mut results: BTreeMap<String, Result<String>> = BTreeMap::new();
+
+        // Separate bw:// references from key-based lookups
+        let mut ref_entries: Vec<(&str, &str)> = Vec::new(); // (key, reference)
+        let mut key_entries: Vec<&str> = Vec::new();
+
+        for &(key, reference) in keys {
+            if let Some(ref_str) = reference
+                && ref_str.starts_with("bw://")
+            {
+                ref_entries.push((key, ref_str));
+                continue;
+            }
+            key_entries.push(key);
+        }
+
+        // --- Handle bw:// references: group by item name, one fetch per unique item ---
+        if !ref_entries.is_empty() {
+            // Group: item_name → Vec<(env_key, field_name)>
+            let mut by_item: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
+            for (env_key, ref_str) in &ref_entries {
+                if let Some((_folder, item, field)) = Self::parse_bw_reference(ref_str) {
+                    by_item.entry(item).or_default().push((env_key, field));
+                } else {
+                    results.insert(
+                        env_key.to_string(),
+                        Err(anyhow::anyhow!(
+                            "Invalid bw:// reference format: {ref_str}. Expected bw://[folder/]item/field"
+                        )),
+                    );
+                }
+            }
+
+            for (item_name, fields) in &by_item {
+                match Self::run_bw(&["get", "item", item_name]) {
+                    Ok(item_json) => {
+                        let item: std::result::Result<serde_json::Value, _> =
+                            serde_json::from_str(&item_json);
+                        match item {
+                            Ok(item_val) => {
+                                for &(env_key, field_name) in fields {
+                                    results.insert(
+                                        env_key.to_string(),
+                                        Self::extract_field_from_value(&item_val, field_name),
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                for &(env_key, _) in fields {
+                                    results.insert(
+                                        env_key.to_string(),
+                                        Err(anyhow::anyhow!("Failed to parse Bitwarden item JSON for '{item_name}': {e}")),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        for &(env_key, _) in fields {
+                            results.insert(
+                                env_key.to_string(),
+                                Err(anyhow::anyhow!(
+                                    "Failed to fetch Bitwarden item '{item_name}': {e}"
+                                )),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Handle key-based lookups ---
+        if !key_entries.is_empty() {
+            if let Some(item_name) = ctx.config.effective_item(ctx.dir) {
+                // Item mode: single fetch, extract all keys as fields
+                debug!(
+                    "Batch resolving {} keys as fields on Bitwarden item '{item_name}'",
+                    key_entries.len()
+                );
+                match Self::run_bw(&["get", "item", item_name]) {
+                    Ok(item_json) => {
+                        let item: std::result::Result<serde_json::Value, _> =
+                            serde_json::from_str(&item_json);
+                        match item {
+                            Ok(item_val) => {
+                                for key in &key_entries {
+                                    results.insert(
+                                        key.to_string(),
+                                        Self::extract_field_from_value(&item_val, key),
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                for key in &key_entries {
+                                    results.insert(
+                                        key.to_string(),
+                                        Err(anyhow::anyhow!(
+                                            "Failed to parse Bitwarden item JSON: {e}"
+                                        )),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        for key in &key_entries {
+                            results.insert(
+                                key.to_string(),
+                                Err(anyhow::anyhow!(
+                                    "Failed to fetch Bitwarden item '{item_name}': {e}"
+                                )),
+                            );
+                        }
+                    }
+                }
+            } else {
+                // Item-per-key mode: single list call, disambiguate in-process
+                debug!(
+                    "Batch resolving {} keys via Bitwarden item list",
+                    key_entries.len()
+                );
+                let folder_id: Option<String> = bw_config
+                    .folder
+                    .as_deref()
+                    .map(Self::resolve_folder_id)
+                    .transpose()
+                    .ok()
+                    .flatten()
+                    .flatten();
+
+                // Build list args: optionally filter by folder
+                let mut list_args: Vec<&str> = vec!["list", "items"];
+                let folder_id_str;
+                if let Some(ref fid) = folder_id {
+                    folder_id_str = fid.clone();
+                    list_args.push("--folderid");
+                    list_args.push(&folder_id_str);
+                }
+
+                match Self::run_bw(&list_args) {
+                    Ok(items_json) => {
+                        let all_items: Vec<serde_json::Value> =
+                            serde_json::from_str(&items_json).unwrap_or_default();
+                        for key in &key_entries {
+                            results.insert(
+                                key.to_string(),
+                                Self::disambiguate_items_from_list(
+                                    key,
+                                    &all_items,
+                                    folder_id.as_deref(),
+                                    ctx.project.as_deref(),
+                                ),
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        for key in &key_entries {
+                            results.insert(
+                                key.to_string(),
+                                Err(anyhow::anyhow!("Failed to list Bitwarden items: {e}")),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
+    fn resolve_once(key: &str, reference: Option<&str>, ctx: &ResolveContext) -> Result<String> {
         debug!(key, reference, "Resolving Bitwarden secret");
         let bw_config = ctx.config.effective_bw(ctx.dir);
 
@@ -480,8 +1097,28 @@ impl Backend for BwBackend {
             Self::disambiguate_items(key, folder_id.as_deref(), ctx.project.as_deref())
         }
     }
+}
+
+impl Backend for BwBackend {
+    fn resolve(&self, key: &str, reference: Option<&str>, ctx: &ResolveContext) -> Result<String> {
+        Self::configure_sync_throttle(ctx.config.effective_bw(ctx.dir).sync_throttle_secs);
+
+        match Self::resolve_once(key, reference, ctx) {
+            Ok(value) => Ok(value),
+            Err(error) if Self::should_retry_after_sync(&error) => {
+                warn!(
+                    key,
+                    "Bitwarden lookup failed, forcing sync and retrying once"
+                );
+                Self::force_sync_vault();
+                Self::resolve_once(key, reference, ctx)
+            }
+            Err(error) => Err(error),
+        }
+    }
 
     fn store(&self, key: &str, value: &str, ctx: &StoreContext) -> Result<()> {
+        Self::configure_sync_throttle(ctx.config.effective_bw(ctx.dir).sync_throttle_secs);
         debug!(key, "Storing secret in Bitwarden");
         let bw_config = ctx.config.effective_bw(ctx.dir);
         let metadata_fields = Self::migration_metadata_fields(ctx);
@@ -511,6 +1148,7 @@ impl Backend for BwBackend {
                 cmd.stdin(std::process::Stdio::piped());
                 cmd.stdout(std::process::Stdio::piped());
                 cmd.stderr(std::process::Stdio::piped());
+                let started_at = Instant::now();
                 let mut child = cmd.spawn()?;
                 if let Some(mut stdin) = child.stdin.take() {
                     use std::io::Write;
@@ -519,6 +1157,11 @@ impl Backend for BwBackend {
                     stdin.write_all(encoded_b64.as_bytes())?;
                 }
                 let output = child.wait_with_output()?;
+                Self::log_action_timing(
+                    &format!("bw edit item {item_name}"),
+                    started_at,
+                    output.status.success(),
+                );
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     bail!("bw edit failed: {stderr}");
@@ -556,12 +1199,14 @@ impl Backend for BwBackend {
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        let started_at = Instant::now();
         let mut child = cmd.spawn()?;
         if let Some(mut stdin) = child.stdin.take() {
             use std::io::Write;
             stdin.write_all(encoded_b64.as_bytes())?;
         }
         let output = child.wait_with_output()?;
+        Self::log_action_timing("bw create item", started_at, output.status.success());
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!("bw create failed: {stderr}");
@@ -571,6 +1216,7 @@ impl Backend for BwBackend {
     }
 
     fn has(&self, key: &str, ctx: &ResolveContext) -> Result<bool> {
+        Self::configure_sync_throttle(ctx.config.effective_bw(ctx.dir).sync_throttle_secs);
         match self.resolve(key, None, ctx) {
             Ok(_) => Ok(true),
             Err(_) => Ok(false),
@@ -734,8 +1380,12 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
 
-        // Reset the cached session so each test starts fresh
+        // Reset the cached session and folder IDs so each test starts fresh
         *super::SESSION.lock().unwrap() = None;
+        BwBackend::invalidate_folder_cache();
+        BwBackend::set_test_folder_cache_path(None);
+        BwBackend::set_test_sync_state_path(None);
+        BwBackend::set_test_sync_throttle_override(None);
 
         let dir = tempfile::TempDir::new().unwrap();
         let script_path = dir.path().join("bw");
@@ -766,8 +1416,12 @@ mod tests {
                 None => std::env::remove_var("BW_SESSION"),
             }
         }
-        // Reset session cache after test too
+        // Reset session and folder cache after test too
         *super::SESSION.lock().unwrap() = None;
+        BwBackend::invalidate_folder_cache();
+        BwBackend::set_test_folder_cache_path(None);
+        BwBackend::set_test_sync_state_path(None);
+        BwBackend::set_test_sync_throttle_override(None);
     }
 
     fn make_bw_item_json(password: &str) -> String {
@@ -837,6 +1491,58 @@ mod tests {
             let backend = BwBackend;
             let result = backend.resolve("MY_KEY", None, &ctx);
             assert_eq!(result.unwrap(), "direct-password");
+        });
+    }
+
+    #[test]
+    fn backend_resolve_retries_after_forced_sync_on_missing_item() {
+        let state_dir = tempfile::TempDir::new().unwrap();
+        let synced_marker = state_dir.path().join("synced-marker");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"sync\" ]; then\n  touch '{}'\n  echo 'synced'\n  exit 0\nfi\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then\n  if [ -f '{}' ]; then\n    echo '[{{\"name\":\"MY_KEY\",\"login\":{{\"password\":\"after-sync\"}},\"fields\":[]}}]'\n  else\n    echo '[]'\n  fi\n  exit 0\nfi\nexit 1\n",
+            synced_marker.display(),
+            synced_marker.display()
+        );
+
+        with_mock_bw(&script, || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let dir = std::path::Path::new("/tmp");
+            let ctx = make_resolve_context(&config, dir);
+            let backend = BwBackend;
+            let result = backend.resolve("MY_KEY", None, &ctx);
+            assert_eq!(result.unwrap(), "after-sync");
+        });
+    }
+
+    #[test]
+    fn resolve_batch_retries_after_forced_sync_on_missing_item() {
+        let state_dir = tempfile::TempDir::new().unwrap();
+        let synced_marker = state_dir.path().join("synced-marker");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"sync\" ]; then\n  touch '{}'\n  echo 'synced'\n  exit 0\nfi\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then\n  if [ -f '{}' ]; then\n    echo '[{{\"name\":\"MY_KEY\",\"login\":{{\"password\":\"after-sync\"}},\"fields\":[]}}]'\n  else\n    echo '[]'\n  fi\n  exit 0\nfi\nexit 1\n",
+            synced_marker.display(),
+            synced_marker.display()
+        );
+
+        with_mock_bw(&script, || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let dir = std::path::Path::new("/tmp");
+            let ctx = make_resolve_context(&config, dir);
+            let results = BwBackend::resolve_batch(&[("MY_KEY", None)], &ctx);
+            assert_eq!(
+                results.get("MY_KEY").unwrap().as_ref().unwrap(),
+                "after-sync"
+            );
         });
     }
 
@@ -1002,6 +1708,149 @@ mod tests {
             let result =
                 BwBackend::disambiguate_items("DB_PASS", Some("folder-abc"), Some("myapp"));
             assert_eq!(result.unwrap(), "", "should return empty when ambiguous");
+        });
+    }
+
+    #[test]
+    fn resolve_folder_id_persists_cache_to_disk() {
+        let state_dir = tempfile::TempDir::new().unwrap();
+        let call_log = state_dir.path().join("bw-calls.log");
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\necho '[{{\"name\":\"Engineering\",\"id\":\"folder-123\"}}]'\n",
+            call_log.display()
+        );
+
+        with_mock_bw(&script, || {
+            let cache_path = state_dir
+                .path()
+                .join("pw-env")
+                .join(FOLDER_ID_CACHE_FILE_NAME);
+            BwBackend::set_test_folder_cache_path(Some(cache_path.clone()));
+
+            let first = BwBackend::resolve_folder_id("Engineering").unwrap();
+            assert_eq!(first.as_deref(), Some("folder-123"));
+            assert!(cache_path.exists(), "expected persisted folder cache file");
+
+            BwBackend::invalidate_folder_cache();
+
+            let second = BwBackend::resolve_folder_id("Engineering").unwrap();
+            assert_eq!(second.as_deref(), Some("folder-123"));
+
+            let log = std::fs::read_to_string(&call_log).unwrap();
+            let lookup_calls = log
+                .lines()
+                .filter(|line| *line == "list folders --search Engineering")
+                .count();
+            assert_eq!(lookup_calls, 1, "expected only one bw folder lookup");
+
+            let persisted: FolderIdCacheStore =
+                serde_json::from_str(&std::fs::read_to_string(&cache_path).unwrap()).unwrap();
+            assert_eq!(
+                persisted.folder_ids.get("Engineering").map(String::as_str),
+                Some("folder-123")
+            );
+        });
+    }
+
+    #[test]
+    fn clear_folder_cache_removes_persisted_file() {
+        let state_dir = tempfile::TempDir::new().unwrap();
+        let cache_path = state_dir
+            .path()
+            .join("pw-env")
+            .join(FOLDER_ID_CACHE_FILE_NAME);
+
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &cache_path,
+            "{\"folder_ids\":{\"Engineering\":\"folder-123\"}}",
+        )
+        .unwrap();
+
+        with_mock_bw("#!/bin/sh\nexit 1\n", || {
+            BwBackend::set_test_folder_cache_path(Some(cache_path.clone()));
+            assert!(BwBackend::clear_folder_cache().unwrap());
+            assert!(!cache_path.exists());
+        });
+    }
+
+    #[test]
+    fn clear_sync_state_removes_persisted_file() {
+        let state_dir = tempfile::TempDir::new().unwrap();
+        let sync_state_path = state_dir.path().join("pw-env").join(SYNC_STATE_FILE_NAME);
+
+        std::fs::create_dir_all(sync_state_path.parent().unwrap()).unwrap();
+        std::fs::write(&sync_state_path, "{\"last_sync_unix_secs\":123}").unwrap();
+
+        with_mock_bw("#!/bin/sh\nexit 1\n", || {
+            BwBackend::set_test_sync_state_path(Some(sync_state_path.clone()));
+            assert!(BwBackend::clear_sync_state().unwrap());
+            assert!(!sync_state_path.exists());
+        });
+    }
+
+    #[test]
+    fn sync_vault_skips_recent_syncs_from_persisted_state() {
+        let state_dir = tempfile::TempDir::new().unwrap();
+        let sync_state_path = state_dir.path().join("pw-env").join(SYNC_STATE_FILE_NAME);
+        std::fs::create_dir_all(sync_state_path.parent().unwrap()).unwrap();
+        let now = BwBackend::current_unix_secs().unwrap();
+        std::fs::write(
+            &sync_state_path,
+            format!("{{\"last_sync_unix_secs\":{now}}}"),
+        )
+        .unwrap();
+
+        let call_log = state_dir.path().join("bw-sync-calls.log");
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nexit 0\n",
+            call_log.display()
+        );
+
+        with_mock_bw(&script, || {
+            BwBackend::set_test_sync_state_path(Some(sync_state_path.clone()));
+            BwBackend::sync_vault();
+            assert!(
+                !call_log.exists()
+                    || std::fs::read_to_string(&call_log)
+                        .unwrap()
+                        .trim()
+                        .is_empty(),
+                "expected no bw sync call when sync state is fresh"
+            );
+        });
+    }
+
+    #[test]
+    fn sync_vault_clamps_configured_throttle_to_one_hour_minimum() {
+        let state_dir = tempfile::TempDir::new().unwrap();
+        let sync_state_path = state_dir.path().join("pw-env").join(SYNC_STATE_FILE_NAME);
+        std::fs::create_dir_all(sync_state_path.parent().unwrap()).unwrap();
+        let now = BwBackend::current_unix_secs().unwrap();
+        std::fs::write(
+            &sync_state_path,
+            format!("{{\"last_sync_unix_secs\":{}}}", now.saturating_sub(600)),
+        )
+        .unwrap();
+
+        let call_log = state_dir.path().join("bw-sync-calls.log");
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nexit 0\n",
+            call_log.display()
+        );
+
+        with_mock_bw(&script, || {
+            BwBackend::set_test_sync_state_path(Some(sync_state_path.clone()));
+            BwBackend::set_test_sync_throttle_override(Some(30));
+            BwBackend::sync_vault();
+            assert!(
+                !call_log.exists()
+                    || std::fs::read_to_string(&call_log)
+                        .unwrap()
+                        .trim()
+                        .is_empty(),
+                "expected no bw sync call when configured throttle is below the one-hour minimum"
+            );
         });
     }
 

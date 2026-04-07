@@ -1,8 +1,10 @@
 use anyhow::Result;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use tracing::{debug, info, warn};
 
+use crate::backend::bw::BwBackend;
 use crate::backend::{self, ResolveContext};
 use crate::config::Config;
 use crate::env_file::{EntryKind, EnvEntry, EnvFile};
@@ -77,7 +79,9 @@ pub fn resolve_env_file(
     config: &Config,
     dir: &Path,
 ) -> Result<BTreeMap<String, String>> {
+    let started_at = Instant::now();
     let mut resolved = BTreeMap::new();
+    let mut bitwarden_duration_ms = 0u128;
     let entries = env_file.resolvable_entries();
 
     if entries.is_empty() {
@@ -143,30 +147,42 @@ pub fn resolve_env_file(
         }
     }
 
-    // Resolve bw:// references
+    // Resolve bw:// references using batch path
     if !bw_entries.is_empty() {
-        let backend = backend::create_backend("bw")?;
+        let bw_started_at = Instant::now();
         let ctx = ResolveContext {
             dir,
             config,
             project: project.clone(),
         };
+
+        // Collect all (key, reference) pairs for the batch call
+        let batch_keys: Vec<(&str, Option<&str>)> = bw_entries
+            .iter()
+            .map(|entry| {
+                let reference = match &entry.kind {
+                    EntryKind::BwReference(r) => Some(r.as_str()),
+                    _ => None,
+                };
+                (entry.key.as_str(), reference)
+            })
+            .collect();
+
+        let step_label = format!("Bitwarden: resolving {} entries", bw_entries.len());
+        let mut spinner = ActivitySpinner::new(step_label);
+
+        let batch_results = BwBackend::resolve_batch(&batch_keys, &ctx);
+
         for (idx, entry) in bw_entries.iter().enumerate() {
-            let reference = match &entry.kind {
-                EntryKind::BwReference(r) => Some(r.as_str()),
-                _ => None,
-            };
-            let step_label = format!(
+            spinner.set_message(format!(
                 "Bitwarden: resolving {} ({}/{})",
                 entry.key,
                 idx + 1,
                 bw_entries.len()
-            );
-            let mut spinner = ActivitySpinner::new(step_label.clone());
-            spinner.set_message(step_label);
-            match backend.resolve(&entry.key, reference, &ctx) {
-                Ok(value) => {
-                    spinner.finish(format!(
+            ));
+            match batch_results.get(&entry.key) {
+                Some(Ok(value)) => {
+                    spinner.set_message(format!(
                         "Bitwarden: resolved {} ({}/{})",
                         entry.key,
                         idx + 1,
@@ -177,22 +193,28 @@ pub fn resolve_env_file(
                         &env_file.path,
                         dir,
                         project.as_deref(),
-                        backend.name(),
+                        "Bitwarden",
                         &entry.key,
                     );
-                    resolved.insert(entry.key.clone(), value);
+                    resolved.insert(entry.key.clone(), value.clone());
                 }
-                Err(e) => {
-                    spinner.fail(format!(
-                        "Bitwarden: failed {} ({}/{})",
-                        entry.key,
-                        idx + 1,
-                        bw_entries.len()
-                    ));
+                Some(Err(e)) => {
                     warn!("Failed to resolve {} via Bitwarden: {e}", entry.key);
+                }
+                None => {
+                    warn!("No result for {} from Bitwarden batch resolve", entry.key);
                 }
             }
         }
+        spinner.finish(format!(
+            "Bitwarden: resolved {}/{} entries",
+            bw_entries
+                .iter()
+                .filter(|e| resolved.contains_key(&e.key))
+                .count(),
+            bw_entries.len()
+        ));
+        bitwarden_duration_ms += bw_started_at.elapsed().as_millis();
     }
 
     // Resolve empty entries via the default backend
@@ -233,6 +255,7 @@ pub fn resolve_env_file(
                 config,
                 project: project.clone(),
             };
+            let bitwarden_default_started_at = (backend.name() == "Bitwarden").then(Instant::now);
             for entry in &default_entries {
                 match backend.resolve(&entry.key, None, &ctx) {
                     Ok(value) => {
@@ -255,8 +278,26 @@ pub fn resolve_env_file(
                     }
                 }
             }
+            if let Some(backend_started_at) = bitwarden_default_started_at {
+                bitwarden_duration_ms += backend_started_at.elapsed().as_millis();
+            }
         }
     }
+
+    let total_duration_ms = started_at.elapsed().as_millis();
+    debug!(
+        total_entries = entries.len(),
+        resolved_count = resolved.len(),
+        unresolved_count = entries.len().saturating_sub(resolved.len()),
+        total_duration_ms,
+        bitwarden_duration_ms,
+        bitwarden_share_percent = if total_duration_ms > 0 {
+            (bitwarden_duration_ms * 100 / total_duration_ms) as u64
+        } else {
+            0
+        },
+        "Resolve env file finished"
+    );
 
     Ok(resolved)
 }

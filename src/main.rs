@@ -82,6 +82,11 @@ enum Commands {
         #[command(subcommand)]
         command: ApprovalCommands,
     },
+    /// Manage local non-secret caches
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommands,
+    },
     /// Download and replace the current binary with a released build
     Update {
         /// Release version to install (for example 0.2.8 or v0.2.8)
@@ -150,6 +155,12 @@ enum ApprovalCommands {
         /// Path to a .env file or a directory containing one
         path: PathBuf,
     },
+}
+
+#[derive(Subcommand)]
+enum CacheCommands {
+    /// Clear persisted Bitwarden metadata and sync-throttle cache state
+    Clear,
 }
 
 fn main() {
@@ -401,6 +412,8 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
         }
 
         Commands::Approvals { command } => handle_approvals(command),
+
+        Commands::Cache { command } => handle_cache(command),
 
         Commands::Update { version } => release::update(version.as_deref()),
 
@@ -884,6 +897,43 @@ fn handle_approvals(command: ApprovalCommands) -> Result<()> {
     }
 }
 
+fn handle_cache(command: CacheCommands) -> Result<()> {
+    match command {
+        CacheCommands::Clear => {
+            let folder_cache_path = backend::bw::BwBackend::folder_cache_path();
+            let sync_state_path = backend::bw::BwBackend::sync_state_path();
+            let folder_cache_cleared = backend::bw::BwBackend::clear_folder_cache()?;
+            let sync_state_cleared = backend::bw::BwBackend::clear_sync_state()?;
+
+            match (folder_cache_cleared, folder_cache_path) {
+                (true, Some(path)) => {
+                    eprintln!("Cleared Bitwarden folder cache: {}", path.display())
+                }
+                (false, Some(path)) => {
+                    eprintln!("No Bitwarden folder cache file found at {}", path.display())
+                }
+                (true, None) => eprintln!("Cleared Bitwarden folder cache"),
+                (false, None) => {
+                    eprintln!("No Bitwarden folder cache location is available on this system")
+                }
+            }
+
+            match (sync_state_cleared, sync_state_path) {
+                (true, Some(path)) => eprintln!("Cleared Bitwarden sync state: {}", path.display()),
+                (false, Some(path)) => {
+                    eprintln!("No Bitwarden sync state file found at {}", path.display())
+                }
+                (true, None) => eprintln!("Cleared Bitwarden sync state"),
+                (false, None) => {
+                    eprintln!("No Bitwarden sync state location is available on this system")
+                }
+            }
+
+            Ok(())
+        }
+    }
+}
+
 fn config_template() -> String {
     r#"# pw-env configuration
 # Place this file at ~/.config/pw-env/config.toml
@@ -907,6 +957,8 @@ backend = "op"
 # organization = ""
 # Default item name — if set, keys are resolved as custom fields on this item
 # item = "project-env"
+# Minimum seconds between automatic `bw sync` calls (minimum and default: 3600)
+# sync_throttle_secs = 3600
 
 [defaults.gpg]
 # Default encrypted file name to look for
@@ -1149,6 +1201,7 @@ mod tests {
         assert!(template.contains("[defaults]"));
         assert!(template.contains("backend"));
         assert!(template.contains("pw-env"));
+        assert!(template.contains("sync_throttle_secs"));
     }
 
     #[test]
@@ -1303,6 +1356,58 @@ mod tests {
         std::fs::write(&env_path, "DB_URL=\n").unwrap();
 
         let result = handle_approvals(ApprovalCommands::RevokeFetch { path: env_path });
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn handle_cache_clear_removes_folder_cache_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let cache_path = temp_dir
+            .path()
+            .join("pw-env")
+            .join("bitwarden-folder-ids.json");
+        let sync_state_path = temp_dir
+            .path()
+            .join("pw-env")
+            .join("bitwarden-sync-state.json");
+
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &cache_path,
+            "{\"folder_ids\":{\"Engineering\":\"folder-123\"}}",
+        )
+        .unwrap();
+        std::fs::write(&sync_state_path, "{\"last_sync_unix_secs\":123}").unwrap();
+
+        crate::backend::bw::BwBackend::set_test_folder_cache_path(Some(cache_path.clone()));
+        crate::backend::bw::BwBackend::set_test_sync_state_path(Some(sync_state_path.clone()));
+        let result = handle_cache(CacheCommands::Clear);
+        crate::backend::bw::BwBackend::set_test_folder_cache_path(None);
+        crate::backend::bw::BwBackend::set_test_sync_state_path(None);
+
+        assert!(result.is_ok());
+        assert!(!cache_path.exists());
+        assert!(!sync_state_path.exists());
+    }
+
+    #[test]
+    fn handle_cache_clear_returns_ok_when_cache_file_is_absent() {
+        let temp_dir = TempDir::new().unwrap();
+        let cache_path = temp_dir
+            .path()
+            .join("pw-env")
+            .join("bitwarden-folder-ids.json");
+        let sync_state_path = temp_dir
+            .path()
+            .join("pw-env")
+            .join("bitwarden-sync-state.json");
+
+        crate::backend::bw::BwBackend::set_test_folder_cache_path(Some(cache_path));
+        crate::backend::bw::BwBackend::set_test_sync_state_path(Some(sync_state_path));
+        let result = handle_cache(CacheCommands::Clear);
+        crate::backend::bw::BwBackend::set_test_folder_cache_path(None);
+        crate::backend::bw::BwBackend::set_test_sync_state_path(None);
+
         assert!(result.is_ok());
     }
 

@@ -6,7 +6,6 @@ use std::time::Duration;
 enum SpinnerCommand {
     UpdateMessage(String),
     Finish(String),
-    Fail(String),
     Clear,
 }
 
@@ -52,10 +51,6 @@ impl ActivitySpinner {
         self.stop(SpinnerCommand::Finish(message.into()));
     }
 
-    pub fn fail(&mut self, message: impl Into<String>) {
-        self.stop(SpinnerCommand::Fail(message.into()));
-    }
-
     fn stop(&mut self, command: SpinnerCommand) {
         if let Some(state) = self.state.take() {
             let _ = state.tx.send(command);
@@ -83,12 +78,6 @@ fn run_spinner_loop(rx: Receiver<SpinnerCommand>, mut message: String) {
             }
             Ok(SpinnerCommand::Finish(done_message)) => {
                 write_status_line(&mut stderr, "ok", &done_message, &mut prev_line_len);
-                let _ = writeln!(stderr);
-                let _ = stderr.flush();
-                return;
-            }
-            Ok(SpinnerCommand::Fail(err_message)) => {
-                write_status_line(&mut stderr, "err", &err_message, &mut prev_line_len);
                 let _ = writeln!(stderr);
                 let _ = stderr.flush();
                 return;

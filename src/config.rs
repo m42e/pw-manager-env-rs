@@ -145,7 +145,7 @@ pub struct OpConfig {
     pub item: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BwConfig {
     #[serde(default)]
     pub folder: Option<String>,
@@ -154,6 +154,23 @@ pub struct BwConfig {
     /// Item name to look up keys as fields (if set, keys are resolved as custom fields of this item)
     #[serde(default)]
     pub item: Option<String>,
+    #[serde(default = "default_bw_sync_throttle_secs")]
+    pub sync_throttle_secs: u64,
+}
+
+fn default_bw_sync_throttle_secs() -> u64 {
+    3600
+}
+
+impl Default for BwConfig {
+    fn default() -> Self {
+        Self {
+            folder: None,
+            organization: None,
+            item: None,
+            sync_throttle_secs: default_bw_sync_throttle_secs(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1514,6 +1531,7 @@ vault = "Work"
                 backend: "bw".to_string(),
                 bw: BwConfig {
                     folder: Some("default-folder".to_string()),
+                    sync_throttle_secs: 300,
                     ..Default::default()
                 },
                 ..Defaults::default()
@@ -1524,6 +1542,7 @@ vault = "Work"
                 path: "/home/user/work".to_string(),
                 bw: Some(BwConfig {
                     folder: Some("work-folder".to_string()),
+                    sync_throttle_secs: 30,
                     ..Default::default()
                 }),
                 ..ProjectOverride::default()
@@ -1531,6 +1550,12 @@ vault = "Work"
         };
         let bw = config.effective_bw(Path::new("/home/user/work/service"));
         assert_eq!(bw.folder.as_deref(), Some("work-folder"));
+        assert_eq!(bw.sync_throttle_secs, 30);
+    }
+
+    #[test]
+    fn test_bw_config_default_sync_throttle_is_set() {
+        assert_eq!(BwConfig::default().sync_throttle_secs, 3600);
     }
 
     #[test]
