@@ -62,7 +62,7 @@ The install scripts currently support these prebuilt targets:
 - macOS Intel
 - Linux x86_64
 - Linux arm64
-- Windows x86_64 when run from a POSIX shell environment such as Git Bash
+- Windows x86_64, requires Powershell or a POSIX shell environment
 
 To inspect what would be downloaded without installing:
 
