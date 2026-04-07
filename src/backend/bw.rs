@@ -735,14 +735,23 @@ impl BwBackend {
         Self::disambiguate_items_from_list(key, &items, folder_id, project)
     }
 
-    /// Core disambiguation logic that works on a pre-fetched list of items.
-    /// Used by both the single-key `disambiguate_items` and the batch resolver.
-    fn disambiguate_items_from_list(
+    fn resolve_reference_folder_id(
+        reference_folder: Option<&str>,
+        configured_folder: Option<&str>,
+    ) -> Result<Option<String>> {
+        reference_folder
+            .or(configured_folder)
+            .map(Self::resolve_folder_id)
+            .transpose()
+            .map(|folder_id| folder_id.flatten())
+    }
+
+    fn select_item_from_list<'a>(
         key: &str,
-        items: &[serde_json::Value],
+        items: &'a [serde_json::Value],
         folder_id: Option<&str>,
         project: Option<&str>,
-    ) -> Result<String> {
+    ) -> Result<Option<&'a serde_json::Value>> {
         debug!(
             key,
             item_count = items.len(),
@@ -771,7 +780,7 @@ impl BwBackend {
         }
 
         if matching.len() == 1 {
-            return Self::extract_field_from_value(matching[0], "password");
+            return Ok(Some(matching[0]));
         }
 
         // Multiple matches — try narrowing by folder
@@ -790,7 +799,7 @@ impl BwBackend {
             }
             if matching.len() == 1 {
                 debug!("Disambiguated Bitwarden item by folder for '{key}'");
-                return Self::extract_field_from_value(matching[0], "password");
+                return Ok(Some(matching[0]));
             }
         }
 
@@ -820,11 +829,10 @@ impl BwBackend {
             }
             if matching.len() == 1 {
                 debug!("Disambiguated Bitwarden item by project field '{proj}'");
-                return Self::extract_field_from_value(matching[0], "password");
+                return Ok(Some(matching[0]));
             }
         }
 
-        // Still ambiguous — notify user and leave blank
         warn!(
             "Multiple Bitwarden items found for '{key}' — could not disambiguate, leaving value blank"
         );
@@ -832,7 +840,44 @@ impl BwBackend {
             "pw-env: multiple Bitwarden items found for '{key}'. \
              Configure defaults.bw.folder or add a 'project' field to disambiguate."
         );
-        Ok(String::new())
+        Ok(None)
+    }
+
+    fn resolve_reference_field(
+        item_name: &str,
+        field_name: &str,
+        folder_id: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<String> {
+        let search_json = Self::run_bw(&["list", "items", "--search", item_name])?;
+        let items: Vec<serde_json::Value> =
+            serde_json::from_str(&search_json).context("Failed to parse bw list items JSON")?;
+
+        let Some(item) = Self::select_item_from_list(item_name, &items, folder_id, project)? else {
+            return Ok(String::new());
+        };
+
+        let item_identifier = item
+            .get("id")
+            .and_then(|id| id.as_str())
+            .unwrap_or(item_name);
+        let item_json = Self::run_bw(&["get", "item", item_identifier])?;
+        Self::extract_field_from_item(&item_json, field_name)
+    }
+
+    /// Core disambiguation logic that works on a pre-fetched list of items.
+    /// Used by both the single-key `disambiguate_items` and the batch resolver.
+    fn disambiguate_items_from_list(
+        key: &str,
+        items: &[serde_json::Value],
+        folder_id: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<String> {
+        let Some(item) = Self::select_item_from_list(key, items, folder_id, project)? else {
+            return Ok(String::new());
+        };
+
+        Self::extract_field_from_value(item, "password")
     }
 
     /// Batch-resolve multiple Bitwarden entries with minimal CLI calls.
@@ -906,11 +951,26 @@ impl BwBackend {
 
         // --- Handle bw:// references: group by item name, one fetch per unique item ---
         if !ref_entries.is_empty() {
-            // Group: item_name → Vec<(env_key, field_name)>
-            let mut by_item: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
             for (env_key, ref_str) in &ref_entries {
-                if let Some((_folder, item, field)) = Self::parse_bw_reference(ref_str) {
-                    by_item.entry(item).or_default().push((env_key, field));
+                if let Some((reference_folder, item_name, field_name)) =
+                    Self::parse_bw_reference(ref_str)
+                {
+                    let folder_id = Self::resolve_reference_folder_id(
+                        reference_folder,
+                        bw_config.folder.as_deref(),
+                    );
+                    results.insert(
+                        env_key.to_string(),
+                        match folder_id {
+                            Ok(folder_id) => Self::resolve_reference_field(
+                                item_name,
+                                field_name,
+                                folder_id.as_deref(),
+                                ctx.project.as_deref(),
+                            ),
+                            Err(error) => Err(error),
+                        },
+                    );
                 } else {
                     results.insert(
                         env_key.to_string(),
@@ -918,43 +978,6 @@ impl BwBackend {
                             "Invalid bw:// reference format: {ref_str}. Expected bw://[folder/]item/field"
                         )),
                     );
-                }
-            }
-
-            for (item_name, fields) in &by_item {
-                match Self::run_bw(&["get", "item", item_name]) {
-                    Ok(item_json) => {
-                        let item: std::result::Result<serde_json::Value, _> =
-                            serde_json::from_str(&item_json);
-                        match item {
-                            Ok(item_val) => {
-                                for &(env_key, field_name) in fields {
-                                    results.insert(
-                                        env_key.to_string(),
-                                        Self::extract_field_from_value(&item_val, field_name),
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                for &(env_key, _) in fields {
-                                    results.insert(
-                                        env_key.to_string(),
-                                        Err(anyhow::anyhow!("Failed to parse Bitwarden item JSON for '{item_name}': {e}")),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        for &(env_key, _) in fields {
-                            results.insert(
-                                env_key.to_string(),
-                                Err(anyhow::anyhow!(
-                                    "Failed to fetch Bitwarden item '{item_name}': {e}"
-                                )),
-                            );
-                        }
-                    }
                 }
             }
         }
@@ -1066,10 +1089,18 @@ impl BwBackend {
         if let Some(ref_str) = reference
             && ref_str.starts_with("bw://")
         {
-            if let Some((_folder, item, field)) = Self::parse_bw_reference(ref_str) {
+            if let Some((reference_folder, item, field)) = Self::parse_bw_reference(ref_str) {
                 debug!("Resolving Bitwarden reference: {ref_str}");
-                let item_json = Self::run_bw(&["get", "item", item])?;
-                return Self::extract_field_from_item(&item_json, field);
+                let folder_id = Self::resolve_reference_folder_id(
+                    reference_folder,
+                    bw_config.folder.as_deref(),
+                )?;
+                return Self::resolve_reference_field(
+                    item,
+                    field,
+                    folder_id.as_deref(),
+                    ctx.project.as_deref(),
+                );
             } else {
                 bail!(
                     "Invalid bw:// reference format: {ref_str}. Expected bw://[folder/]item/field"
@@ -1458,7 +1489,10 @@ mod tests {
     #[test]
     fn backend_resolve_with_bw_reference() {
         let item_json = make_bw_item_json("secret-pw");
-        let script = format!("#!/bin/sh\necho '{}'\n", item_json);
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then\n  echo '[{{\"id\":\"item-1\",\"name\":\"my-item\",\"login\":{{\"password\":\"secret-pw\"}},\"fields\":[]}}]'\n  exit 0\nfi\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ] && [ \"$3\" = \"item-1\" ]; then\n  echo '{}'\n  exit 0\nfi\necho 'unexpected command' >&2\nexit 1\n",
+            item_json
+        );
         with_mock_bw(&script, || {
             let config = Config {
                 defaults: Defaults::default(),
@@ -1471,6 +1505,116 @@ mod tests {
             let backend = BwBackend;
             let result = backend.resolve("API_KEY", Some("bw://my-item/password"), &ctx);
             assert_eq!(result.unwrap(), "secret-pw");
+        });
+    }
+
+    #[test]
+    fn backend_resolve_with_bw_reference_disambiguates_by_folder_then_project() {
+        let selected_item = serde_json::json!({
+            "id": "item-1",
+            "name": "my-item",
+            "folderId": "folder-abc",
+            "login": { "password": "proj-pw" },
+            "fields": [{"name":"project","value":"test-project","type":0}]
+        });
+        let items_json = serde_json::json!([
+            selected_item,
+            {
+                "id": "item-2",
+                "name": "my-item",
+                "folderId": "folder-abc",
+                "login": { "password": "other-pw" },
+                "fields": [{"name":"project","value":"other-project","type":0}]
+            },
+            {
+                "id": "item-3",
+                "name": "my-item",
+                "folderId": "folder-other",
+                "login": { "password": "wrong-pw" },
+                "fields": []
+            }
+        ])
+        .to_string();
+        let selected_item_json = serde_json::json!({
+            "id": "item-1",
+            "name": "my-item",
+            "login": { "password": "proj-pw" },
+            "fields": [{"name":"project","value":"test-project","type":0}]
+        })
+        .to_string();
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"folders\" ]; then\n  echo '[{{\"name\":\"Secrets\",\"id\":\"folder-abc\"}}]'\n  exit 0\nfi\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then\n  echo '{}'\n  exit 0\nfi\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ] && [ \"$3\" = \"item-1\" ]; then\n  echo '{}'\n  exit 0\nfi\necho 'unexpected command' >&2\nexit 1\n",
+            items_json, selected_item_json
+        );
+
+        with_mock_bw(&script, || {
+            let config = Config {
+                defaults: Defaults {
+                    bw: BwConfig {
+                        folder: Some("Secrets".to_string()),
+                        ..Default::default()
+                    },
+                    ..Defaults::default()
+                },
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = make_resolve_context(&config, std::path::Path::new("/tmp"));
+            let backend = BwBackend;
+            let result = backend.resolve("API_KEY", Some("bw://my-item/password"), &ctx);
+            assert_eq!(result.unwrap(), "proj-pw");
+        });
+    }
+
+    #[test]
+    fn resolve_batch_reference_disambiguates_by_folder_then_project() {
+        let items_json = serde_json::json!([
+            {
+                "id": "item-1",
+                "name": "my-item",
+                "folderId": "folder-abc",
+                "login": { "password": "proj-pw" },
+                "fields": [{"name":"project","value":"test-project","type":0}]
+            },
+            {
+                "id": "item-2",
+                "name": "my-item",
+                "folderId": "folder-abc",
+                "login": { "password": "other-pw" },
+                "fields": [{"name":"project","value":"other-project","type":0}]
+            }
+        ])
+        .to_string();
+        let selected_item_json = serde_json::json!({
+            "id": "item-1",
+            "name": "my-item",
+            "login": { "password": "proj-pw" },
+            "fields": [{"name":"project","value":"test-project","type":0}]
+        })
+        .to_string();
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"folders\" ]; then\n  echo '[{{\"name\":\"Secrets\",\"id\":\"folder-abc\"}}]'\n  exit 0\nfi\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then\n  echo '{}'\n  exit 0\nfi\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ] && [ \"$3\" = \"item-1\" ]; then\n  echo '{}'\n  exit 0\nfi\necho 'unexpected command' >&2\nexit 1\n",
+            items_json, selected_item_json
+        );
+
+        with_mock_bw(&script, || {
+            let config = Config {
+                defaults: Defaults {
+                    bw: BwConfig {
+                        folder: Some("Secrets".to_string()),
+                        ..Default::default()
+                    },
+                    ..Defaults::default()
+                },
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = make_resolve_context(&config, std::path::Path::new("/tmp"));
+            let results =
+                BwBackend::resolve_batch(&[("API_KEY", Some("bw://my-item/password"))], &ctx);
+            assert_eq!(results.get("API_KEY").unwrap().as_ref().unwrap(), "proj-pw");
         });
     }
 

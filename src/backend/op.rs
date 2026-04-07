@@ -197,6 +197,12 @@ impl Backend for OpBackend {
             .iter()
             .map(|assignment| assignment.as_str())
             .collect();
+        let vault_args: Vec<String> = op_config
+            .vault
+            .as_ref()
+            .map(|v| vec![format!("--vault={v}")])
+            .unwrap_or_default();
+        let vault_refs: Vec<&str> = vault_args.iter().map(|s| s.as_str()).collect();
 
         if let Some(item) = ctx.config.effective_item(ctx.dir) {
             // Try to edit the existing item first, adding/updating the field
@@ -204,6 +210,7 @@ impl Backend for OpBackend {
             let field_assignment = format!("{key}={value}");
             let mut args = vec!["item", "edit", item, field_assignment.as_str()];
             args.extend_from_slice(&metadata_refs);
+            args.extend_from_slice(&vault_refs);
             let result = Self::run_op(&args, account);
             if result.is_ok() {
                 return Ok(());
@@ -212,13 +219,6 @@ impl Backend for OpBackend {
         }
 
         // Create a new item with the key as the item name
-        let vault_args: Vec<String> = op_config
-            .vault
-            .as_ref()
-            .map(|v| vec![format!("--vault={v}")])
-            .unwrap_or_default();
-        let vault_refs: Vec<&str> = vault_args.iter().map(|s| s.as_str()).collect();
-
         let field_assignment = format!("password={value}");
         let title_arg = format!("--title={key}");
         let mut args = vec![
@@ -541,6 +541,35 @@ mod tests {
                 config: &config,
                 project: None,
             };
+            let result = OpBackend.store("MY_KEY", "my-value", &ctx);
+            assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        });
+    }
+
+    #[test]
+    fn backend_store_with_item_configured_includes_vault_arg() {
+        let script = "#!/bin/sh\nif [ \"$1\" = \"item\" ] && [ \"$2\" = \"edit\" ]; then\n  for arg in \"$@\"; do\n    if [ \"$arg\" = \"--vault=WorkVault\" ]; then\n      echo 'edited'\n      exit 0\n    fi\n  done\n  echo 'missing vault arg' >&2\n  exit 1\nfi\necho 'unexpected command' >&2\nexit 1\n";
+
+        with_mock_op(script, || {
+            let config = Config {
+                defaults: Defaults {
+                    op: crate::config::OpConfig {
+                        item: Some("my-op-item".to_string()),
+                        vault: Some("WorkVault".to_string()),
+                        ..Default::default()
+                    },
+                    ..Defaults::default()
+                },
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = StoreContext {
+                dir: Path::new("/tmp"),
+                config: &config,
+                project: None,
+            };
+
             let result = OpBackend.store("MY_KEY", "my-value", &ctx);
             assert!(result.is_ok(), "expected Ok, got: {:?}", result);
         });

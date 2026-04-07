@@ -663,11 +663,13 @@ mod tests {
         );
     }
 
-    /// The bw:// reference in an entry must be forwarded to the backend's "get item" command.
+    /// The bw:// reference in an entry must be forwarded to the backend's
+    /// exact-name search and selected-item lookup path.
     ///
     /// This test covers two mutations:
     /// - `delete match arm EntryKind::BwReference(r)` → reference becomes None, the backend
-    ///   falls back to "get password BW_KEY" which the mock rejects → key absent.
+    ///   falls back to searching for `BW_KEY` instead of `my-item`, which the mock rejects
+    ///   → key absent.
     /// - `delete ! in !bw_entries.is_empty()` → the bw block only runs when bw_entries is
     ///   empty, so BW_KEY is never resolved → key absent.
     #[cfg(unix)]
@@ -678,14 +680,16 @@ mod tests {
         fs::create_dir_all(&temp).unwrap();
         fs::write(&env_path, "BW_KEY=bw://my-item/password\n").unwrap();
 
-        let bw_item_json = r#"{"type":1,"name":"my-item","login":{"password":"bw-ref-secret"}}"#;
+        let bw_list_json = r#"[{"id":"item-1","name":"my-item","login":{"password":"bw-ref-secret"},"fields":[]}]"#;
+        let bw_item_json =
+            r#"{"type":1,"id":"item-1","name":"my-item","login":{"password":"bw-ref-secret"}}"#;
         // Match only the exact item name extracted from the bw:// reference ("my-item").
-        // Without the BwReference arm the backend falls back to "get item BW_KEY" (the env
-        // key name), which does NOT match "my-item", so the mock exits with an error and
-        // the key stays absent from the resolved map.
+        // Without the BwReference arm the backend falls back to searching for "BW_KEY"
+        // (the env key name), which does NOT match "my-item", so the mock exits with an
+        // error and the key stays absent from the resolved map.
         let bw_script = format!(
-            "#!/bin/sh\nif [ \"$1\" = 'status' ]; then echo '{{\"status\":\"unlocked\"}}'; elif [ \"$1\" = 'get' ] && [ \"$2\" = 'item' ] && [ \"$3\" = 'my-item' ]; then echo '{}'; else exit 1; fi\n",
-            bw_item_json
+            "#!/bin/sh\nif [ \"$1\" = 'status' ]; then echo '{{\"status\":\"unlocked\"}}'; elif [ \"$1\" = 'list' ] && [ \"$2\" = 'items' ] && [ \"$4\" = 'my-item' ]; then echo '{}'; elif [ \"$1\" = 'get' ] && [ \"$2\" = 'item' ] && [ \"$3\" = 'item-1' ]; then echo '{}'; else exit 1; fi\n",
+            bw_list_json, bw_item_json
         );
 
         let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
@@ -704,7 +708,7 @@ mod tests {
         assert_eq!(
             resolved.get("BW_KEY").map(String::as_str),
             Some("bw-ref-secret"),
-            "bw:// reference should be forwarded to 'bw get item'"
+            "bw:// reference should be resolved via exact-name search and selected-item lookup"
         );
     }
 
