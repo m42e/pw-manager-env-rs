@@ -144,7 +144,15 @@ jobs:
                 echo "::notice title=Accepted::$tag $target accepted by Apple; updating release asset."
                 echo "Notarization accepted for $tag $target; downloading release asset and stapling binary."
                 mkdir -p "$package_dir"
-                gh release download "$tag" -R "$GH_REPO" --pattern "$asset_name" --dir "$asset_dir"
+                if ! gh release download "$tag" -R "$GH_REPO" --pattern "$asset_name" --dir "$asset_dir"; then
+                  echo "::warning title=Failed::$tag $target release not found; deleting artifact."
+                  echo "Release $tag not found for $artifact_name; deleting artifact."
+                  printf '%s\n' "- $tag $target: release not found; artifact deleted." >> "$GITHUB_STEP_SUMMARY"
+                  gh api -X DELETE "repos/$GH_REPO/actions/artifacts/$artifact_id"
+                  failed_count=$((failed_count + 1))
+                  rm -rf "$workdir"
+                  continue
+                fi
 
                 case "$archive" in
                   tar.gz)
@@ -213,7 +221,14 @@ jobs:
                     ;;
                 esac
 
-                gh release upload "$tag" -R "$GH_REPO" "$asset_path" --clobber
+                if ! gh release upload "$tag" -R "$GH_REPO" "$asset_path" --clobber; then
+                  echo "::warning title=Failed::$tag $target release upload failed; keeping artifact for retry."
+                  echo "Release upload failed for $tag $target; keeping artifact for retry."
+                  printf '%s\n' "- $tag $target: release upload failed; will retry." >> "$GITHUB_STEP_SUMMARY"
+                  failed_count=$((failed_count + 1))
+                  rm -rf "$workdir"
+                  continue
+                fi
                 gh api -X DELETE "repos/$GH_REPO/actions/artifacts/$artifact_id"
                 accepted_count=$((accepted_count + 1))
                 echo "::notice title=Completed::$tag $target completed; release asset replaced."
