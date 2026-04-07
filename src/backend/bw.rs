@@ -1,8 +1,12 @@
 use anyhow::{Context, Result, bail};
 use std::process::Command;
-use tracing::{debug, info, warn};
+use std::sync::Mutex;
+use tracing::{debug, info, trace, warn};
 
 use super::{Backend, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME, ResolveContext, StoreContext};
+
+/// Cached BW_SESSION key. `None` means not yet determined.
+static SESSION: Mutex<Option<String>> = Mutex::new(None);
 
 pub struct BwBackend;
 
@@ -51,18 +55,220 @@ impl BwBackend {
         }
     }
 
-    fn run_bw(args: &[&str]) -> Result<String> {
+    /// Ensure the Bitwarden vault is unlocked and return the session key.
+    ///
+    /// Resolution order:
+    /// 1. Return the cached session from a previous call.
+    /// 2. Use the `BW_SESSION` environment variable if set.
+    /// 3. Run `bw status` to inspect vault state:
+    ///    - *unauthenticated* → fail fast, ask user to `bw login`.
+    ///    - *locked*          → interactively prompt `bw unlock` and cache the key.
+    ///    - *unlocked*        → proceed without a session key.
+    fn ensure_session() -> Result<String> {
+        let mut guard = SESSION.lock().unwrap();
+        if let Some(ref session) = *guard {
+            trace!("Reusing cached Bitwarden session");
+            return Ok(session.clone());
+        }
+
+        debug!("No cached Bitwarden session, resolving…");
+
+        // 1. BW_SESSION already exported by the caller / shell
+        if let Ok(session) = std::env::var("BW_SESSION") {
+            if !session.is_empty() {
+                info!("Using BW_SESSION from environment");
+                *guard = Some(session.clone());
+                drop(guard);
+                Self::sync_vault();
+                return Ok(session);
+            }
+            debug!("BW_SESSION is set but empty, falling back to bw status");
+        }
+
+        // 2. Ask bw for its current status
+        debug!("Running: bw status");
+        let status_json = {
+            let mut cmd = Command::new("bw");
+            cmd.arg("status");
+            cmd.stdin(std::process::Stdio::null());
+            let output = cmd
+                .output()
+                .context("Failed to execute `bw` CLI. Is Bitwarden CLI installed?")?;
+            String::from_utf8(output.stdout).context("bw output was not valid UTF-8")?
+        };
+
+        let status: serde_json::Value = serde_json::from_str(status_json.trim())
+            .context("Failed to parse `bw status` output")?;
+        let vault_status = status
+            .get("status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("unknown");
+        debug!(vault_status, "Bitwarden vault status");
+
+        match vault_status {
+            "unauthenticated" => {
+                bail!("Not logged in to Bitwarden. Please log in first:\n\n  bw login\n");
+            }
+            "locked" => {
+                let session = Self::prompt_unlock()?;
+                *guard = Some(session.clone());
+                drop(guard);
+                Self::sync_vault();
+                Ok(session)
+            }
+            "unlocked" => {
+                debug!("Bitwarden vault is already unlocked");
+                let session = String::new();
+                *guard = Some(session.clone());
+                drop(guard);
+                Self::sync_vault();
+                Ok(session)
+            }
+            other => {
+                bail!("Unknown Bitwarden vault status: {other}");
+            }
+        }
+    }
+
+    /// Sync the Bitwarden vault to ensure the local cache is up to date.
+    /// Logs a warning on failure but does not abort — a stale cache is
+    /// better than blocking the entire workflow.
+    fn sync_vault() {
+        debug!("Syncing Bitwarden vault");
+        match Self::run_bw(&["sync"]) {
+            Ok(_) => info!("Bitwarden vault synced"),
+            Err(e) => warn!("Bitwarden sync failed (continuing with local cache): {e}"),
+        }
+    }
+
+    /// Create a pre-configured `bw` [`Command`] with the session key set.
+    fn bw_command() -> Result<Command> {
+        let session = Self::ensure_session()?;
         let mut cmd = Command::new("bw");
+        if !session.is_empty() {
+            trace!("Injecting BW_SESSION into command environment");
+            cmd.env("BW_SESSION", &session);
+        }
+        Ok(cmd)
+    }
+
+    /// Prompt the user for their master password and unlock the vault.
+    ///
+    /// Uses `dialoguer` for the password prompt (no ANSI escape leakage)
+    /// and passes the password to `bw unlock` via `--passwordenv` so the
+    /// child process never writes interactive escape codes.
+    fn prompt_unlock() -> Result<String> {
+        info!("Bitwarden vault is locked, prompting for unlock");
+        let password = dialoguer::Password::new()
+            .with_prompt("Bitwarden master password")
+            .interact()
+            .context("Failed to read master password")?;
+
+        debug!("Running: bw unlock --raw --passwordenv ...");
+        let output = Command::new("bw")
+            .args(["unlock", "--raw", "--passwordenv", "BW_MASTER_PW"])
+            .env("BW_MASTER_PW", &password)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .context("Failed to run `bw unlock`")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            debug!(%stderr, "bw unlock failed");
+            bail!("Failed to unlock Bitwarden vault: {stderr}");
+        }
+
+        let session = String::from_utf8(output.stdout)
+            .context("BW_SESSION was not valid UTF-8")?
+            .trim()
+            .to_string();
+        if session.is_empty() {
+            bail!("Failed to obtain session key from `bw unlock`");
+        }
+        info!("Bitwarden vault unlocked successfully");
+        Ok(session)
+    }
+
+    /// Invalidate the cached session so the next call to [`ensure_session`]
+    /// re-checks the vault status and potentially re-prompts.
+    fn invalidate_session() {
+        let mut guard = SESSION.lock().unwrap();
+        if guard.is_some() {
+            debug!("Invalidating cached Bitwarden session");
+            *guard = None;
+        }
+    }
+
+    /// Returns `true` if the stderr output indicates a stale / invalid session.
+    fn is_stale_session_error(stderr: &str) -> bool {
+        let lower = stderr.to_lowercase();
+        lower.contains("invalid master password")
+            || lower.contains("session key is invalid")
+            || lower.contains("not logged in")
+    }
+
+    /// Resolve a Bitwarden folder name to its UUID.
+    fn resolve_folder_id(folder_name: &str) -> Result<Option<String>> {
+        debug!(folder_name, "Looking up Bitwarden folder ID");
+        let folders_json = Self::run_bw(&["list", "folders", "--search", folder_name])?;
+        let folders: serde_json::Value = serde_json::from_str(&folders_json)?;
+        if let Some(folder_arr) = folders.as_array() {
+            // --search is a fuzzy/substring match; find the exact name match
+            let exact = folder_arr.iter().find(|f| {
+                f.get("name").and_then(|n| n.as_str()) == Some(folder_name)
+            });
+            if let Some(folder) = exact
+                && let Some(id) = folder.get("id").and_then(|i| i.as_str())
+            {
+                debug!(folder_name, folder_id = %id, "Resolved Bitwarden folder");
+                return Ok(Some(id.to_string()));
+            }
+        }
+        warn!(folder_name, "Bitwarden folder not found");
+        Ok(None)
+    }
+
+    fn run_bw(args: &[&str]) -> Result<String> {
+        let mut cmd = Self::bw_command()?;
         cmd.args(args);
         cmd.stdin(std::process::Stdio::null());
         debug!("Running: bw {}", args.join(" "));
-        let output = cmd.output().context(
-            "Failed to execute `bw` CLI. Is Bitwarden CLI installed? Is the vault unlocked (BW_SESSION)?",
-        )?;
+        let output = cmd
+            .output()
+            .context("Failed to execute `bw` CLI. Is Bitwarden CLI installed?")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            debug!(args = args.join(" "), %stderr, "bw command failed");
+
+            // Detect stale session → invalidate, re-auth, and retry once
+            if Self::is_stale_session_error(&stderr) {
+                warn!("Bitwarden session is stale, re-authenticating");
+                Self::invalidate_session();
+                let mut retry_cmd = Self::bw_command()?;
+                retry_cmd.args(args);
+                retry_cmd.stdin(std::process::Stdio::null());
+                debug!("Retrying: bw {}", args.join(" "));
+                let retry_output = retry_cmd
+                    .output()
+                    .context("Failed to execute `bw` CLI on retry")?;
+                if !retry_output.status.success() {
+                    let retry_stderr = String::from_utf8_lossy(&retry_output.stderr);
+                    bail!("bw command failed after re-auth: {retry_stderr}");
+                }
+                trace!(
+                    args = args.join(" "),
+                    "bw command succeeded (after re-auth)"
+                );
+                let stdout = String::from_utf8(retry_output.stdout)
+                    .context("bw output was not valid UTF-8")?;
+                return Ok(stdout.trim().to_string());
+            }
+
             bail!("bw command failed: {stderr}");
         }
+        trace!(args = args.join(" "), "bw command succeeded");
         let stdout = String::from_utf8(output.stdout).context("bw output was not valid UTF-8")?;
         Ok(stdout.trim().to_string())
     }
@@ -126,20 +332,45 @@ impl BwBackend {
         bail!("Field '{field_name}' not found in Bitwarden item");
     }
 
-    /// Resolve a key when multiple items share the same name, by checking
-    /// the "project" custom field on each candidate item.
-    fn resolve_by_project(key: &str, project: &str) -> Result<String> {
+    /// Resolve a key when multiple items share the same name, by narrowing
+    /// candidates first by folder, then by the "project" custom field.
+    ///
+    /// If more than one candidate remains after all filters, a warning is
+    /// printed and an empty string is returned so the caller can proceed
+    /// without blocking the entire env resolution.
+    fn disambiguate_items(
+        key: &str,
+        folder_id: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<String> {
         let search_json = Self::run_bw(&["list", "items", "--search", key])?;
         let items: Vec<serde_json::Value> =
             serde_json::from_str(&search_json).context("Failed to parse bw list items JSON")?;
 
-        // Filter by exact name match
-        let matching: Vec<&serde_json::Value> = items
+        debug!(
+            key,
+            item_count = items.len(),
+            "Search returned {} item(s)",
+            items.len()
+        );
+
+        // Filter by exact name match (also accept legacy "export KEY" names)
+        let mut matching: Vec<&serde_json::Value> = items
             .iter()
-            .filter(|item| item.get("name").and_then(|n| n.as_str()) == Some(key))
+            .filter(|item| {
+                let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                name == key || name == format!("export {key}")
+            })
             .collect();
 
         if matching.is_empty() {
+            if !items.is_empty() {
+                let names: Vec<&str> = items
+                    .iter()
+                    .filter_map(|i| i.get("name").and_then(|n| n.as_str()))
+                    .collect();
+                debug!(key, ?names, "No exact match among search results");
+            }
             bail!("No Bitwarden items found with name '{key}'");
         }
 
@@ -147,33 +378,71 @@ impl BwBackend {
             return Self::extract_field_from_value(matching[0], "password");
         }
 
-        // Multiple matches — check each item's "project" custom field
-        info!(
-            "Found {} items named '{key}', disambiguating by project '{project}'",
-            matching.len()
-        );
-        for item in &matching {
-            if let Some(fields) = item.get("fields").and_then(|f| f.as_array()) {
-                for field in fields {
-                    let name = field.get("name").and_then(|n| n.as_str());
-                    if (name == Some("project") || name == Some("Project"))
-                        && field.get("value").and_then(|v| v.as_str()) == Some(project)
-                    {
-                        debug!("Matched Bitwarden item by project field '{project}'");
-                        return Self::extract_field_from_value(item, "password");
-                    }
-                }
+        // Multiple matches — try narrowing by folder
+        if let Some(fid) = folder_id {
+            info!(
+                "Found {} items named '{key}', narrowing by folder",
+                matching.len()
+            );
+            let folder_filtered: Vec<&serde_json::Value> = matching
+                .iter()
+                .filter(|item| item.get("folderId").and_then(|f| f.as_str()) == Some(fid))
+                .copied()
+                .collect();
+            if !folder_filtered.is_empty() {
+                matching = folder_filtered;
+            }
+            if matching.len() == 1 {
+                debug!("Disambiguated Bitwarden item by folder for '{key}'");
+                return Self::extract_field_from_value(matching[0], "password");
             }
         }
 
-        bail!(
-            "Multiple Bitwarden items found for '{key}' but none have a 'project' field matching '{project}'"
+        // Still ambiguous — try narrowing by project
+        if let Some(proj) = project {
+            info!(
+                "Found {} items named '{key}', narrowing by project '{proj}'",
+                matching.len()
+            );
+            let project_filtered: Vec<&serde_json::Value> = matching
+                .iter()
+                .filter(|item| {
+                    item.get("fields")
+                        .and_then(|f| f.as_array())
+                        .is_some_and(|fields| {
+                            fields.iter().any(|field| {
+                                let name = field.get("name").and_then(|n| n.as_str());
+                                (name == Some("project") || name == Some("Project"))
+                                    && field.get("value").and_then(|v| v.as_str()) == Some(proj)
+                            })
+                        })
+                })
+                .copied()
+                .collect();
+            if !project_filtered.is_empty() {
+                matching = project_filtered;
+            }
+            if matching.len() == 1 {
+                debug!("Disambiguated Bitwarden item by project field '{proj}'");
+                return Self::extract_field_from_value(matching[0], "password");
+            }
+        }
+
+        // Still ambiguous — notify user and leave blank
+        warn!(
+            "Multiple Bitwarden items found for '{key}' — could not disambiguate, leaving value blank"
         );
+        eprintln!(
+            "pw-env: multiple Bitwarden items found for '{key}'. \
+             Configure defaults.bw.folder or add a 'project' field to disambiguate."
+        );
+        Ok(String::new())
     }
 }
 
 impl Backend for BwBackend {
     fn resolve(&self, key: &str, reference: Option<&str>, ctx: &ResolveContext) -> Result<String> {
+        debug!(key, reference, "Resolving Bitwarden secret");
         let bw_config = ctx.config.effective_bw(ctx.dir);
 
         // Handle bw:// references
@@ -198,47 +467,22 @@ impl Backend for BwBackend {
             let item_json = Self::run_bw(&["get", "item", item])?;
             Self::extract_field_from_item(&item_json, key)
         } else {
-            // Look up the key as a password item
+            // Look up the key as a password item using list + exact-name filter
+            // (`bw get password` and `bw get item` do substring matching, which
+            // can return the wrong entry when item names are similar.)
             debug!("Resolving key '{key}' as Bitwarden item password");
-            let result = Self::run_bw(&["get", "password", key]);
-            match result {
-                Ok(password) => return Ok(password),
-                Err(e) => {
-                    let err_msg = format!("{e}").to_lowercase();
-                    if err_msg.contains("more than one") {
-                        // Multiple matches — try disambiguation by project
-                        if let Some(ref project) = ctx.project {
-                            debug!(
-                                "Multiple items match '{key}', disambiguating by project '{project}'"
-                            );
-                            return Self::resolve_by_project(key, project);
-                        }
-                        return Err(e);
-                    }
-                    // Fallback: try to get the item and check fields
-                    warn!("Direct password lookup failed for '{key}', trying item lookup");
-                }
-            }
-            let mut args = vec!["get", "item", key];
-            let folder_id: String;
-            if let Some(ref folder) = bw_config.folder {
-                // First get the folder ID
-                let folders_json = Self::run_bw(&["list", "folders", "--search", folder])?;
-                let folders: serde_json::Value = serde_json::from_str(&folders_json)?;
-                if let Some(folder_arr) = folders.as_array()
-                    && let Some(first) = folder_arr.first()
-                    && let Some(id) = first.get("id").and_then(|i| i.as_str())
-                {
-                    folder_id = id.to_string();
-                    args.extend_from_slice(&["--folderid", &folder_id]);
-                }
-            }
-            let item_json = Self::run_bw(&args)?;
-            Self::extract_field_from_item(&item_json, "password")
+            let folder_id: Option<String> = bw_config
+                .folder
+                .as_deref()
+                .map(Self::resolve_folder_id)
+                .transpose()?
+                .flatten();
+            Self::disambiguate_items(key, folder_id.as_deref(), ctx.project.as_deref())
         }
     }
 
     fn store(&self, key: &str, value: &str, ctx: &StoreContext) -> Result<()> {
+        debug!(key, "Storing secret in Bitwarden");
         let bw_config = ctx.config.effective_bw(ctx.dir);
         let metadata_fields = Self::migration_metadata_fields(ctx);
 
@@ -262,7 +506,7 @@ impl Backend for BwBackend {
                 }
                 let encoded = serde_json::to_string(&item)?;
                 // bw edit item expects base64-encoded JSON on stdin, but we use a simpler approach
-                let mut cmd = Command::new("bw");
+                let mut cmd = Self::bw_command()?;
                 cmd.args(["edit", "item", item_name]);
                 cmd.stdin(std::process::Stdio::piped());
                 cmd.stdout(std::process::Stdio::piped());
@@ -279,25 +523,35 @@ impl Backend for BwBackend {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     bail!("bw edit failed: {stderr}");
                 }
+                info!(
+                    key,
+                    item_name, "Updated custom field on existing Bitwarden item"
+                );
                 return Ok(());
             }
         }
 
         // Create a new login item
         debug!("Creating new Bitwarden item for key '{key}'");
+        let folder_id: Option<String> = bw_config
+            .folder
+            .as_deref()
+            .map(Self::resolve_folder_id)
+            .transpose()?
+            .flatten();
         let item_template = serde_json::json!({
             "type": 1,
             "name": key,
             "login": {
                 "password": value
             },
-            "folderId": bw_config.folder.as_deref(),
+            "folderId": folder_id,
             "fields": metadata_fields
         });
         let encoded = serde_json::to_string(&item_template)?;
         let encoded_b64 = base64_encode(encoded.as_bytes());
 
-        let mut cmd = Command::new("bw");
+        let mut cmd = Self::bw_command()?;
         cmd.args(["create", "item"]);
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
@@ -312,6 +566,7 @@ impl Backend for BwBackend {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!("bw create failed: {stderr}");
         }
+        info!(key, "Created new Bitwarden item");
         Ok(())
     }
 
@@ -478,6 +733,10 @@ mod tests {
         let _guard = super::super::MOCK_PATH_MUTEX
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+
+        // Reset the cached session so each test starts fresh
+        *super::SESSION.lock().unwrap() = None;
+
         let dir = tempfile::TempDir::new().unwrap();
         let script_path = dir.path().join("bw");
         std::fs::write(&script_path, script).unwrap();
@@ -493,10 +752,22 @@ mod tests {
             std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
         )
         .unwrap();
-        // SAFETY: guarded by MOCK_PATH_MUTEX, single-threaded access to PATH here
-        unsafe { std::env::set_var("PATH", &new_path) };
+        let old_session = std::env::var_os("BW_SESSION");
+        // SAFETY: guarded by MOCK_PATH_MUTEX, single-threaded access to env here
+        unsafe {
+            std::env::set_var("PATH", &new_path);
+            std::env::set_var("BW_SESSION", "mock-session");
+        }
         f();
-        unsafe { std::env::set_var("PATH", &old_path) };
+        unsafe {
+            std::env::set_var("PATH", &old_path);
+            match old_session {
+                Some(val) => std::env::set_var("BW_SESSION", val),
+                None => std::env::remove_var("BW_SESSION"),
+            }
+        }
+        // Reset session cache after test too
+        *super::SESSION.lock().unwrap() = None;
     }
 
     fn make_bw_item_json(password: &str) -> String {
@@ -551,7 +822,9 @@ mod tests {
 
     #[test]
     fn backend_resolve_direct_password_lookup() {
-        with_mock_bw("#!/bin/sh\necho 'direct-password'\n", || {
+        let items_json = r#"[{"name":"MY_KEY","login":{"password":"direct-password"},"fields":[]}]"#;
+        let script = format!("#!/bin/sh\necho '{}'\n", items_json);
+        with_mock_bw(&script, || {
             let config = Config {
                 defaults: Defaults::default(),
                 log: LogConfig::default(),
@@ -568,7 +841,9 @@ mod tests {
 
     #[test]
     fn backend_has_returns_true_when_resolve_succeeds() {
-        with_mock_bw("#!/bin/sh\necho 'some-value'\n", || {
+        let items_json = r#"[{"name":"MY_KEY","login":{"password":"some-value"},"fields":[]}]"#;
+        let script = format!("#!/bin/sh\necho '{}'\n", items_json);
+        with_mock_bw(&script, || {
             let config = Config {
                 defaults: Defaults::default(),
                 log: LogConfig::default(),
@@ -649,13 +924,10 @@ mod tests {
     }
 
     #[test]
-    fn backend_resolve_falls_back_to_item_json_on_password_error() {
-        let item_json = r#"{"type":1,"name":"MY_KEY","login":{"password":"fallback-password"}}"#;
-        // Return error for "get password", item JSON for everything else
-        let script = format!(
-            "#!/bin/sh\nif [ \"$2\" = \"password\" ]; then\necho 'Item not found' >&2\nexit 1\nfi\necho '{}'\n",
-            item_json
-        );
+    fn backend_resolve_exact_name_match_from_list() {
+        // bw list items --search returns items; only the exact name match is used
+        let items_json = r#"[{"name":"MY_KEY","login":{"password":"exact-password"},"fields":[]},{"name":"MY_KEY_EXTRA","login":{"password":"wrong"},"fields":[]}]"#;
+        let script = format!("#!/bin/sh\necho '{}'\n", items_json);
         with_mock_bw(&script, || {
             let config = Config {
                 defaults: Defaults::default(),
@@ -665,19 +937,15 @@ mod tests {
             };
             let ctx = make_resolve_context(&config, std::path::Path::new("/tmp"));
             let result = BwBackend.resolve("MY_KEY", None, &ctx);
-            assert_eq!(result.unwrap(), "fallback-password");
+            assert_eq!(result.unwrap(), "exact-password");
         });
     }
 
     #[test]
     fn backend_resolve_disambiguates_by_project_single_match() {
-        // Return "more than one" error for "get password", items list for "list items"
         let items_json =
             r#"[{"name":"MY_KEY","id":"abc123","login":{"password":"project-pw"},"fields":[]}]"#;
-        let script = format!(
-            "#!/bin/sh\nif [ \"$2\" = \"password\" ]; then\necho 'more than one result was found' >&2\nexit 1\nfi\necho '{}'\n",
-            items_json
-        );
+        let script = format!("#!/bin/sh\necho '{}'\n", items_json);
         with_mock_bw(&script, || {
             let config = Config {
                 defaults: Defaults::default(),
@@ -688,6 +956,51 @@ mod tests {
             let ctx = make_resolve_context(&config, std::path::Path::new("/tmp"));
             let result = BwBackend.resolve("MY_KEY", None, &ctx);
             assert_eq!(result.unwrap(), "project-pw");
+        });
+    }
+
+    #[test]
+    fn disambiguate_items_narrows_by_folder() {
+        // Two items with same name but different folders; one matches the folder ID
+        let items_json = r#"[
+            {"name":"DB_PASS","folderId":"folder-abc","login":{"password":"folder-pw"},"fields":[]},
+            {"name":"DB_PASS","folderId":"folder-other","login":{"password":"wrong-pw"},"fields":[]}
+        ]"#;
+        let script = format!("#!/bin/sh\necho '{}'\n", items_json.replace('\n', ""));
+        with_mock_bw(&script, || {
+            let result = BwBackend::disambiguate_items("DB_PASS", Some("folder-abc"), None);
+            assert_eq!(result.unwrap(), "folder-pw");
+        });
+    }
+
+    #[test]
+    fn disambiguate_items_narrows_by_project_after_folder() {
+        // Three items: two share the same folder, only one has the right project
+        let items_json = r#"[
+            {"name":"DB_PASS","folderId":"folder-abc","login":{"password":"proj-pw"},"fields":[{"name":"project","value":"myapp","type":0}]},
+            {"name":"DB_PASS","folderId":"folder-abc","login":{"password":"other-pw"},"fields":[{"name":"project","value":"otherapp","type":0}]},
+            {"name":"DB_PASS","folderId":"folder-other","login":{"password":"wrong-pw"},"fields":[]}
+        ]"#;
+        let script = format!("#!/bin/sh\necho '{}'\n", items_json.replace('\n', ""));
+        with_mock_bw(&script, || {
+            let result =
+                BwBackend::disambiguate_items("DB_PASS", Some("folder-abc"), Some("myapp"));
+            assert_eq!(result.unwrap(), "proj-pw");
+        });
+    }
+
+    #[test]
+    fn disambiguate_items_returns_empty_when_ambiguous() {
+        // Two items, same folder, same project (or no project) — cannot disambiguate
+        let items_json = r#"[
+            {"name":"DB_PASS","folderId":"folder-abc","login":{"password":"pw1"},"fields":[]},
+            {"name":"DB_PASS","folderId":"folder-abc","login":{"password":"pw2"},"fields":[]}
+        ]"#;
+        let script = format!("#!/bin/sh\necho '{}'\n", items_json.replace('\n', ""));
+        with_mock_bw(&script, || {
+            let result =
+                BwBackend::disambiguate_items("DB_PASS", Some("folder-abc"), Some("myapp"));
+            assert_eq!(result.unwrap(), "", "should return empty when ambiguous");
         });
     }
 

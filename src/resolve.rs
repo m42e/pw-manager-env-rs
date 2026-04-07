@@ -622,7 +622,7 @@ mod tests {
         // key name), which does NOT match "my-item", so the mock exits with an error and
         // the key stays absent from the resolved map.
         let bw_script = format!(
-            "#!/bin/sh\nif [ \"$1\" = 'get' ] && [ \"$2\" = 'item' ] && [ \"$3\" = 'my-item' ]; then echo '{}'; else exit 1; fi\n",
+            "#!/bin/sh\nif [ \"$1\" = 'status' ]; then echo '{{\"status\":\"unlocked\"}}'; elif [ \"$1\" = 'get' ] && [ \"$2\" = 'item' ] && [ \"$3\" = 'my-item' ]; then echo '{}'; else exit 1; fi\n",
             bw_item_json
         );
 
