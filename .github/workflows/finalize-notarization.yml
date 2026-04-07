@@ -174,7 +174,24 @@ jobs:
                   continue
                 fi
 
-                xcrun stapler staple "$binary_path"
+                stapler_exit=0
+                xcrun stapler staple "$binary_path" || stapler_exit=$?
+                if [ "$stapler_exit" -eq 73 ]; then
+                  echo "::notice title=Pending::$tag $target stapling deferred (CDN propagation delay); will retry next run."
+                  echo "Stapler CDN delay (exit 73) for $tag $target; keeping artifact for retry."
+                  printf '%s\n' "- $tag $target: stapling deferred (CDN propagation delay); will retry." >> "$GITHUB_STEP_SUMMARY"
+                  pending_count=$((pending_count + 1))
+                  rm -rf "$workdir"
+                  continue
+                elif [ "$stapler_exit" -ne 0 ]; then
+                  echo "::warning title=Failed::$tag $target stapling failed with exit code $stapler_exit."
+                  echo "Stapling failed for $tag $target with exit code $stapler_exit"
+                  printf '%s\n' "- $tag $target: stapling failed with exit code $stapler_exit." >> "$GITHUB_STEP_SUMMARY"
+                  gh api -X DELETE "repos/$GH_REPO/actions/artifacts/$artifact_id"
+                  failed_count=$((failed_count + 1))
+                  rm -rf "$workdir"
+                  continue
+                fi
                 xcrun stapler validate "$binary_path"
 
                 case "$archive" in
