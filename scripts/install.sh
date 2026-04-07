@@ -213,6 +213,33 @@ print_post_install_note() {
       echo "Add $install_dir to PATH if it is not already available in your shell session."
       ;;
   esac
+
+  shell_name=$(basename "${SHELL:-}")
+  echo ""
+  echo "To enable the pw-env shell hook, add the following to your shell config:"
+  echo ""
+  case "$shell_name" in
+    bash)
+      echo '  eval "$(pw-env init bash)"'
+      echo ""
+      echo "  Add the line above to ~/.bashrc"
+      ;;
+    zsh)
+      echo '  eval "$(pw-env init zsh)"'
+      echo ""
+      echo "  Add the line above to ~/.zshrc"
+      ;;
+    fish)
+      echo '  pw-env init fish | source'
+      echo ""
+      echo "  Add the line above to ~/.config/fish/config.fish"
+      ;;
+    *)
+      echo '  bash:  eval "$(pw-env init bash)"  # add to ~/.bashrc'
+      echo '  zsh:   eval "$(pw-env init zsh)"   # add to ~/.zshrc'
+      echo '  fish:  pw-env init fish | source   # add to ~/.config/fish/config.fish'
+      ;;
+  esac
 }
 
 while [ $# -gt 0 ]; do
