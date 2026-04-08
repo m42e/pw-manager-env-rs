@@ -61,10 +61,10 @@ PowerShell).
 
 ## What the generated hook does
 
-1. Clears any pw-env state from the previous directory.
-2. Checks whether the new working directory contains a `.env` file.
-3. Loads shell state for that directory.
-4. Either exports resolved variables for the directory, or installs transient wrappers for configured commands.
+1. Tracks which directory last loaded pw-env shell state.
+2. Keeps that state active while you move through nested subdirectories under the same directory.
+3. Replaces the state when you enter another directory that has its own `.env` file.
+4. Clears the state when you leave the owning directory tree entirely.
 
 Warnings from pw-env are written to stderr, so they remain visible when the hook is running automatically.
 
