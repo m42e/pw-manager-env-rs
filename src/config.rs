@@ -43,7 +43,7 @@ pub fn state_dir() -> PathBuf {
 /// Write a file with owner-only permissions (0o600) on Unix.
 /// The file is created with restricted permissions from the start so that
 /// sensitive state is never briefly world-readable.
-fn write_private_file(path: &Path, contents: &str) -> Result<()> {
+pub(crate) fn write_private_file(path: &Path, contents: &str) -> Result<()> {
     #[cfg(unix)]
     {
         use std::fs::OpenOptions;
@@ -146,6 +146,8 @@ pub struct Defaults {
     #[serde(default = "default_search_parent_env")]
     pub search_parent_env: bool,
     #[serde(default)]
+    pub cache: CacheConfig,
+    #[serde(default)]
     pub op: OpConfig,
     #[serde(default)]
     pub bw: BwConfig,
@@ -158,6 +160,7 @@ impl Default for Defaults {
         Self {
             backend: default_backend(),
             search_parent_env: default_search_parent_env(),
+            cache: CacheConfig::default(),
             op: OpConfig::default(),
             bw: BwConfig::default(),
             gpg: GpgConfig::default(),
@@ -171,6 +174,31 @@ fn default_backend() -> String {
 
 fn default_search_parent_env() -> bool {
     true
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CacheConfig {
+    #[serde(default = "default_cache_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_cache_ttl_hours")]
+    pub ttl_hours: u64,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_cache_enabled(),
+            ttl_hours: default_cache_ttl_hours(),
+        }
+    }
+}
+
+fn default_cache_enabled() -> bool {
+    true
+}
+
+fn default_cache_ttl_hours() -> u64 {
+    4
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -272,6 +300,8 @@ pub struct ProjectOverride {
     #[serde(default)]
     pub search_parent_env: Option<bool>,
     #[serde(default)]
+    pub cache: Option<CacheConfig>,
+    #[serde(default)]
     pub op: Option<OpConfig>,
     #[serde(default)]
     pub bw: Option<BwConfig>,
@@ -290,6 +320,8 @@ struct ProjectDirectoryOverride {
     pub backend: Option<String>,
     #[serde(default)]
     pub search_parent_env: Option<bool>,
+    #[serde(default)]
+    pub cache: Option<CacheConfig>,
     #[serde(default)]
     pub op: Option<OpConfig>,
     #[serde(default)]
@@ -358,6 +390,7 @@ impl Config {
                 path: project_dir.to_string_lossy().into_owned(),
                 backend: local_override.backend,
                 search_parent_env: local_override.search_parent_env,
+                cache: local_override.cache,
                 op: local_override.op,
                 bw: local_override.bw,
                 gpg: local_override.gpg,
@@ -613,6 +646,13 @@ impl Config {
         self.project_for(dir)
             .and_then(|p| p.op.as_ref())
             .unwrap_or(&self.defaults.op)
+    }
+
+    /// Resolve effective cache config for a given directory.
+    pub fn effective_cache(&self, dir: &Path) -> &CacheConfig {
+        self.project_for(dir)
+            .and_then(|p| p.cache.as_ref())
+            .unwrap_or(&self.defaults.cache)
     }
 
     /// Resolve effective Bitwarden config for a given directory.
@@ -1593,6 +1633,33 @@ vault = "Work"
     }
 
     #[test]
+    fn test_effective_cache_uses_project_override() {
+        let config = Config {
+            defaults: Defaults {
+                cache: CacheConfig {
+                    enabled: true,
+                    ttl_hours: 4,
+                },
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![ProjectOverride {
+                path: "/home/user/work".to_string(),
+                cache: Some(CacheConfig {
+                    enabled: false,
+                    ttl_hours: 1,
+                }),
+                ..ProjectOverride::default()
+            }],
+        };
+
+        let cache = config.effective_cache(Path::new("/home/user/work/service"));
+        assert!(!cache.enabled);
+        assert_eq!(cache.ttl_hours, 1);
+    }
+
+    #[test]
     fn test_effective_bw_uses_project_override() {
         let config = Config {
             defaults: Defaults {
@@ -1624,6 +1691,13 @@ vault = "Work"
     #[test]
     fn test_bw_config_default_sync_throttle_is_set() {
         assert_eq!(BwConfig::default().sync_throttle_secs, 3600);
+    }
+
+    #[test]
+    fn test_cache_config_defaults_are_enabled_for_four_hours() {
+        let cache = CacheConfig::default();
+        assert!(cache.enabled);
+        assert_eq!(cache.ttl_hours, 4);
     }
 
     #[test]
@@ -2118,6 +2192,7 @@ vault = "Work"
                 commands: vec!["echo".to_string(), "cat".to_string()],
                 backend: None,
                 search_parent_env: None,
+                cache: None,
                 op: None,
                 bw: None,
                 gpg: None,

@@ -14,6 +14,7 @@
 | `migrate` | Move plaintext values into the effective backend, or a backend chosen by flag |
 | `check` | Verify backend binaries and config discovery |
 | `approvals` | Manage local override and secret-fetch approvals |
+| `cache` | Clear local metadata caches and the resolved-secret cache index |
 | `update` | Replace the current binary with a GitHub release build |
 | `config-template` | Print the default config template |
 
@@ -128,6 +129,18 @@ pw-env approvals <SUBCOMMAND>
 | `show-fetch` | `pw-env approvals show-fetch [PATH]` | Show the current approval status for secret fetching |
 | `revoke-fetch` | `pw-env approvals revoke-fetch <PATH>` | Remove secret-fetch approvals for a project |
 
+## `cache`
+
+```console
+pw-env cache clear
+```
+
+Clear persisted Bitwarden folder and sync metadata, remove the resolved-secret cache index under the pw-env state
+directory, and best-effort delete the corresponding OS-keyring cache entries.
+
+If the OS keyring is unavailable at clear time, pw-env still removes the local index so future resolutions miss the
+cache and fetch directly from the configured backend.
+
 ## `update`
 
 ```console
@@ -144,6 +157,9 @@ pw-env config-template
 ```
 
 Print the default `config.toml` template to stdout.
+
+The template includes `[defaults.cache]`, where `enabled = true` and `ttl_hours = 4` control the resolved-secret
+cache.
 
 ## Help and version
 

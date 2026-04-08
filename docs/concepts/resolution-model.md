@@ -21,10 +21,24 @@ migration.
 2. If at least one entry needs backend resolution, confirm that secret fetching is approved for the project.
 3. Detect the project name from the nearest Git repository root. If no Git root is found, use the current directory
    name.
-4. Send `op://...` references to 1Password.
-5. Send `bw://...` references to Bitwarden.
-6. Send empty values to the configured default backend.
-7. Export only the keys that resolved successfully.
+4. For each resolvable entry, check the resolved-secret cache if caching is enabled.
+5. Send cache misses for `op://...` references to 1Password.
+6. Send cache misses for `bw://...` references to Bitwarden.
+7. Send cache misses for empty values to the configured default backend.
+8. Write successful backend results back to the cache.
+9. Export only the keys that resolved successfully.
+
+## Resolved-secret cache
+
+When `[defaults.cache]` or a project-level `[cache]` block enables caching, pw-env stores resolved secret values in the
+OS keyring when that secure store is available. The default cache lifetime is 4 hours.
+
+Cache lookups are scoped to the `.env` entry and the effective lookup context, including the selected backend and the
+backend settings that influence how the secret is resolved. Changing the entry or its effective backend settings causes
+pw-env to miss the old cache entry and fetch a fresh value.
+
+If the OS keyring is unavailable, pw-env logs that caching is disabled for the current run and continues resolving
+secrets directly from the backend.
 
 ## Backend-specific behavior
 
@@ -35,7 +49,8 @@ These backends resolve entries one key at a time. Explicit references bypass the
 ### GPG
 
 The GPG backend decrypts the configured encrypted env file once, then pulls the requested empty keys out of the
-decrypted content.
+decrypted content. With caching enabled, pw-env skips that decrypt when every requested GPG-backed key is already in
+the resolved-secret cache.
 
 ## Partial failures are nonfatal
 

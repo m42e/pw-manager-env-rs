@@ -14,6 +14,12 @@ backend = "op"
 # Search parent directories for .env until the git workspace root
 # search_parent_env = true
 
+[defaults.cache]
+# Cache resolved secret values in the OS keyring when available
+enabled = true
+# Re-fetch from the backend after this many hours
+ttl_hours = 4
+
 [defaults.op]
 # Default 1Password vault to search in
 # vault = "Development"
@@ -58,6 +64,10 @@ check_interval_hours = 24
 # item = "api-server-env"
 # commands = ["cargo", "npm"]
 #
+# [projects.cache]
+# enabled = true
+# ttl_hours = 1
+#
 # [projects.op]
 # vault = "Work"
 #
@@ -75,13 +85,14 @@ check_interval_hours = 24
 | Section | Keys | Notes |
 | --- | --- | --- |
 | `[defaults]` | `backend`, `search_parent_env` | Selects the default backend for empty `.env` values and controls parent `.env` discovery |
+| `[defaults.cache]` | `enabled`, `ttl_hours` | Enables OS-keyring caching of resolved secrets and sets the expiry window |
 | `[defaults.op]` | `vault`, `account`, `item` | Default 1Password lookup settings |
 | `[defaults.bw]` | `folder`, `organization`, `item` | Default Bitwarden lookup settings |
 | `[defaults.gpg]` | `file_pattern`, `recipient` | GPG file matching and encryption settings |
 | `[log]` | `level`, `file` | Logging configuration and audit-log destination |
 | `[updates]` | `enabled`, `check_interval_hours` | Automatic GitHub release checks |
 | `[[projects]]` | `path`, `backend`, `search_parent_env`, `item`, `commands` | Per-path overrides; most specific path prefix wins |
-| `[projects.op]`, `[projects.bw]`, `[projects.gpg]` | backend-specific keys | Extra settings for the most recent `[[projects]]` block |
+| `[projects.cache]`, `[projects.op]`, `[projects.bw]`, `[projects.gpg]` | backend-specific keys | Extra settings for the most recent `[[projects]]` block |
 
 ## Valid backend values
 
@@ -98,6 +109,10 @@ search_parent_env = true
 item = "api-server-env"
 commands = ["cargo", "npm"]
 
+[cache]
+enabled = true
+ttl_hours = 4
+
 [op]
 vault = "Work"
 ```
@@ -110,6 +125,10 @@ pw-env loads the local override only after the current file contents are approve
 When `search_parent_env` is `true`, pw-env walks upward from the working directory until it finds the first `.env`
 file or reaches the enclosing git workspace root. Nested git markers such as submodules do not stop the walk early;
 pw-env stops at the highest ancestor git root.
+
+When `[defaults.cache]` or `[cache]` is enabled, pw-env stores resolved secret values in the OS keyring when that
+secure store is available. If the keyring is unavailable, pw-env keeps resolving from the backend normally and simply
+skips secret-value caching for that run.
 
 ## Command-scoped shell integration
 

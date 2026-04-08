@@ -1,5 +1,6 @@
 mod add;
 mod backend;
+mod cache;
 mod config;
 mod env_file;
 mod migrate;
@@ -31,7 +32,7 @@ use tracing::{debug, error, info};
     version,
     about = "Securely load environment variables from password managers",
     long_about = "pw-env resolves .env file entries from 1Password, Bitwarden, or GPG-encrypted files.\n\
-                  Secrets never touch disk — they flow from the password manager through stdout into your shell.",
+                  Resolved values stay out of project files, and pw-env can cache them in the OS keyring when available.",
     arg_required_else_help = true
 )]
 struct Cli {
@@ -99,7 +100,7 @@ enum Commands {
         #[command(subcommand)]
         command: ApprovalCommands,
     },
-    /// Manage local non-secret caches
+    /// Manage local cache state
     Cache {
         #[command(subcommand)]
         command: CacheCommands,
@@ -176,7 +177,7 @@ enum ApprovalCommands {
 
 #[derive(Subcommand)]
 enum CacheCommands {
-    /// Clear persisted Bitwarden metadata and sync-throttle cache state
+    /// Clear persisted Bitwarden metadata and resolved-secret cache state
     Clear,
 }
 
@@ -977,8 +978,10 @@ fn handle_cache(command: CacheCommands) -> Result<()> {
         CacheCommands::Clear => {
             let folder_cache_path = backend::bw::BwBackend::folder_cache_path();
             let sync_state_path = backend::bw::BwBackend::sync_state_path();
+            let secret_cache_path = crate::cache::secret_cache_index_path();
             let folder_cache_cleared = backend::bw::BwBackend::clear_folder_cache()?;
             let sync_state_cleared = backend::bw::BwBackend::clear_sync_state()?;
+            let secret_cache_result = crate::cache::clear_secret_cache()?;
 
             match (folder_cache_cleared, folder_cache_path) {
                 (true, Some(path)) => {
@@ -1004,6 +1007,45 @@ fn handle_cache(command: CacheCommands) -> Result<()> {
                 }
             }
 
+            match (secret_cache_result.cleared_index_file, secret_cache_path) {
+                (true, Some(path)) => {
+                    eprintln!("Cleared resolved-secret cache index: {}", path.display())
+                }
+                (false, Some(path)) => {
+                    eprintln!("No resolved-secret cache index found at {}", path.display())
+                }
+                (true, None) => eprintln!("Cleared resolved-secret cache index"),
+                (false, None) => {
+                    eprintln!("No resolved-secret cache location is available on this system")
+                }
+            }
+
+            if secret_cache_result.keyring_unavailable {
+                eprintln!(
+                    "Resolved-secret cache index was cleared, but the OS keyring was unavailable so cached keyring entries could not be removed"
+                );
+            } else if secret_cache_result.keyring_delete_failures > 0 {
+                eprintln!(
+                    "Failed to remove {} resolved-secret cache keyring entr{}",
+                    secret_cache_result.keyring_delete_failures,
+                    if secret_cache_result.keyring_delete_failures == 1 {
+                        "y"
+                    } else {
+                        "ies"
+                    }
+                );
+            } else if secret_cache_result.deleted_credentials > 0 {
+                eprintln!(
+                    "Removed {} resolved-secret cache keyring entr{}",
+                    secret_cache_result.deleted_credentials,
+                    if secret_cache_result.deleted_credentials == 1 {
+                        "y"
+                    } else {
+                        "ies"
+                    }
+                );
+            }
+
             Ok(())
         }
     }
@@ -1018,6 +1060,12 @@ fn config_template() -> String {
 backend = "op"
 # Search parent directories for .env until the git workspace root (default: true)
 # search_parent_env = true
+
+[defaults.cache]
+# Cache resolved secret values in the OS keyring when available.
+enabled = true
+# Re-fetch a secret from the backend after this many hours.
+ttl_hours = 4
 
 [defaults.op]
 # Default 1Password vault to search in
@@ -1280,6 +1328,8 @@ mod tests {
         assert!(template.contains("backend"));
         assert!(template.contains("pw-env"));
         assert!(template.contains("sync_throttle_secs"));
+        assert!(template.contains("[defaults.cache]"));
+        assert!(template.contains("ttl_hours"));
     }
 
     #[test]
@@ -1448,6 +1498,10 @@ mod tests {
             .path()
             .join("pw-env")
             .join("bitwarden-sync-state.json");
+        let secret_cache_path = temp_dir
+            .path()
+            .join("pw-env")
+            .join("resolved-secret-cache.json");
 
         std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         std::fs::write(
@@ -1456,16 +1510,26 @@ mod tests {
         )
         .unwrap();
         std::fs::write(&sync_state_path, "{\"last_sync_unix_secs\":123}").unwrap();
+        std::fs::write(
+            &secret_cache_path,
+            "{\"entries\":{\"cache-key\":{\"cached_at_unix_secs\":123}}}",
+        )
+        .unwrap();
 
         crate::backend::bw::BwBackend::set_test_folder_cache_path(Some(cache_path.clone()));
         crate::backend::bw::BwBackend::set_test_sync_state_path(Some(sync_state_path.clone()));
+        crate::cache::set_test_secret_cache_index_path(Some(secret_cache_path.clone()));
+        crate::cache::set_test_keyring_available(true);
         let result = handle_cache(CacheCommands::Clear);
         crate::backend::bw::BwBackend::set_test_folder_cache_path(None);
         crate::backend::bw::BwBackend::set_test_sync_state_path(None);
+        crate::cache::set_test_secret_cache_index_path(None);
+        crate::cache::reset_test_keyring();
 
         assert!(result.is_ok());
         assert!(!cache_path.exists());
         assert!(!sync_state_path.exists());
+        assert!(!secret_cache_path.exists());
     }
 
     #[test]
@@ -1479,12 +1543,20 @@ mod tests {
             .path()
             .join("pw-env")
             .join("bitwarden-sync-state.json");
+        let secret_cache_path = temp_dir
+            .path()
+            .join("pw-env")
+            .join("resolved-secret-cache.json");
 
         crate::backend::bw::BwBackend::set_test_folder_cache_path(Some(cache_path));
         crate::backend::bw::BwBackend::set_test_sync_state_path(Some(sync_state_path));
+        crate::cache::set_test_secret_cache_index_path(Some(secret_cache_path));
+        crate::cache::set_test_keyring_available(true);
         let result = handle_cache(CacheCommands::Clear);
         crate::backend::bw::BwBackend::set_test_folder_cache_path(None);
         crate::backend::bw::BwBackend::set_test_sync_state_path(None);
+        crate::cache::set_test_secret_cache_index_path(None);
+        crate::cache::reset_test_keyring();
 
         assert!(result.is_ok());
     }
@@ -1715,6 +1787,7 @@ mod tests {
                 commands: vec!["cat".to_string()],
                 backend: None,
                 search_parent_env: None,
+                cache: None,
                 op: None,
                 bw: None,
                 gpg: None,

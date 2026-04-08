@@ -6,6 +6,7 @@ use tracing::{debug, info, warn};
 
 use crate::backend::bw::BwBackend;
 use crate::backend::{self, ResolveContext};
+use crate::cache::{SecretCacheKey, SecretValueCache};
 use crate::config::Config;
 use crate::env_file::{EntryKind, EnvEntry, EnvFile};
 use crate::progress::ActivitySpinner;
@@ -206,6 +207,48 @@ fn log_credential_fetch_audit(
     );
 }
 
+fn cache_entry_kind(entry: &EnvEntry) -> &'static str {
+    match entry.kind {
+        EntryKind::Empty => "empty",
+        EntryKind::OpReference(_) => "op-reference",
+        EntryKind::BwReference(_) => "bw-reference",
+        EntryKind::Plaintext(_) => "plaintext",
+    }
+}
+
+fn cache_backend_config(config: &Config, dir: &Path, backend: &str) -> String {
+    let serialized = match backend {
+        "op" => serde_json::to_string(config.effective_op(dir)),
+        "bw" => serde_json::to_string(config.effective_bw(dir)),
+        "gpg" => serde_json::to_string(config.effective_gpg(dir)),
+        _ => Ok("{}".to_string()),
+    };
+
+    serialized.unwrap_or_else(|_| "{}".to_string())
+}
+
+fn build_secret_cache_key(
+    env_path: &Path,
+    entry: &EnvEntry,
+    backend: &str,
+    ctx: &ResolveContext,
+) -> SecretCacheKey {
+    SecretCacheKey {
+        env_path: env_path.to_string_lossy().into_owned(),
+        backend: backend.to_string(),
+        entry_key: entry.key.clone(),
+        entry_kind: cache_entry_kind(entry).to_string(),
+        raw_value: entry.raw_value.clone(),
+        project: ctx.project.clone(),
+        repository: ctx.repository.clone(),
+        effective_item: match backend {
+            "op" | "bw" => ctx.config.effective_item(ctx.dir).map(ToOwned::to_owned),
+            _ => None,
+        },
+        backend_config: cache_backend_config(ctx.config, ctx.dir, backend),
+    }
+}
+
 /// Resolve all entries from an .env file to their secret values.
 /// Returns a map of KEY -> resolved_value.
 pub fn resolve_env_file(
@@ -228,6 +271,14 @@ pub fn resolve_env_file(
     let project = detect_project_name(dir);
     let repository = detect_repository_remote(dir);
     debug!("Detected project name: {:?}", project);
+
+    let ctx = ResolveContext {
+        dir,
+        config,
+        project: project.clone(),
+        repository: repository.clone(),
+    };
+    let mut secret_cache = SecretValueCache::load(config.effective_cache(dir));
 
     let default_backend_name = config.effective_backend(dir);
     info!(
@@ -253,13 +304,14 @@ pub fn resolve_env_file(
     // Resolve op:// references
     if !op_entries.is_empty() {
         let backend = backend::create_backend("op")?;
-        let ctx = ResolveContext {
-            dir,
-            config,
-            project: project.clone(),
-            repository: repository.clone(),
-        };
         for entry in &op_entries {
+            let cache_key = build_secret_cache_key(&env_file.path, entry, "op", &ctx);
+            if let Some(value) = secret_cache.get(&cache_key) {
+                debug!("Resolved {} via cached 1Password value", entry.key);
+                resolved.insert(entry.key.clone(), value);
+                continue;
+            }
+
             let reference = match &entry.kind {
                 EntryKind::OpReference(r) => Some(r.as_str()),
                 _ => None,
@@ -267,6 +319,7 @@ pub fn resolve_env_file(
             match backend.resolve(&entry.key, reference, &ctx) {
                 Ok(value) => {
                     info!("Resolved {} via 1Password", entry.key);
+                    secret_cache.set(&cache_key, &value);
                     log_credential_fetch_audit(
                         &env_file.path,
                         dir,
@@ -291,90 +344,121 @@ pub fn resolve_env_file(
     // Resolve all Bitwarden-backed entries through the batch path.
     if !bw_entries.is_empty() {
         let bw_started_at = Instant::now();
-        let ctx = ResolveContext {
-            dir,
-            config,
-            project: project.clone(),
-            repository: repository.clone(),
-        };
+        let mut uncached_bw_entries: Vec<&EnvEntry> = Vec::new();
+        let mut bw_cache_keys: BTreeMap<String, SecretCacheKey> = BTreeMap::new();
 
-        // Collect all (key, reference) pairs for the batch call
-        let batch_keys: Vec<(&str, Option<&str>)> = bw_entries
-            .iter()
-            .map(|entry| {
-                let reference = match &entry.kind {
-                    EntryKind::BwReference(r) => Some(r.as_str()),
-                    EntryKind::Empty => None,
-                    _ => None,
-                };
-                (entry.key.as_str(), reference)
-            })
-            .collect();
+        for entry in &bw_entries {
+            let cache_key = build_secret_cache_key(&env_file.path, entry, "bw", &ctx);
+            if let Some(value) = secret_cache.get(&cache_key) {
+                debug!("Resolved {} via cached Bitwarden value", entry.key);
+                resolved.insert(entry.key.clone(), value);
+                continue;
+            }
 
-        let step_label = format!("Bitwarden: resolving {} entries", bw_entries.len());
-        let mut spinner = ActivitySpinner::new(step_label);
+            bw_cache_keys.insert(entry.key.clone(), cache_key);
+            uncached_bw_entries.push(entry);
+        }
 
-        let batch_results = BwBackend::resolve_batch(&batch_keys, &ctx);
+        if !uncached_bw_entries.is_empty() {
+            // Collect all (key, reference) pairs for the batch call
+            let batch_keys: Vec<(&str, Option<&str>)> = uncached_bw_entries
+                .iter()
+                .map(|entry| {
+                    let reference = match &entry.kind {
+                        EntryKind::BwReference(r) => Some(r.as_str()),
+                        EntryKind::Empty => None,
+                        _ => None,
+                    };
+                    (entry.key.as_str(), reference)
+                })
+                .collect();
 
-        for (idx, entry) in bw_entries.iter().enumerate() {
-            spinner.set_message(format!(
-                "Bitwarden: resolving {} ({}/{})",
-                entry.key,
-                idx + 1,
-                bw_entries.len()
-            ));
-            match batch_results.get(&entry.key) {
-                Some(Ok(value)) => {
-                    spinner.set_message(format!(
-                        "Bitwarden: resolved {} ({}/{})",
-                        entry.key,
-                        idx + 1,
-                        bw_entries.len()
-                    ));
-                    info!("Resolved {} via Bitwarden", entry.key);
-                    log_credential_fetch_audit(
-                        &env_file.path,
-                        dir,
-                        project.as_deref(),
-                        "Bitwarden",
-                        &entry.key,
-                    );
-                    resolved.insert(entry.key.clone(), value.clone());
-                }
-                Some(Err(e)) => {
-                    warn!("Failed to resolve {} via Bitwarden: {e}", entry.key);
-                }
-                None => {
-                    warn!("No result for {} from Bitwarden batch resolve", entry.key);
+            let step_label = format!(
+                "Bitwarden: resolving {} uncached entries",
+                uncached_bw_entries.len()
+            );
+            let mut spinner = ActivitySpinner::new(step_label);
+
+            let batch_results = BwBackend::resolve_batch(&batch_keys, &ctx);
+
+            for (idx, entry) in uncached_bw_entries.iter().enumerate() {
+                spinner.set_message(format!(
+                    "Bitwarden: resolving {} ({}/{})",
+                    entry.key,
+                    idx + 1,
+                    uncached_bw_entries.len()
+                ));
+                match batch_results.get(&entry.key) {
+                    Some(Ok(value)) => {
+                        spinner.set_message(format!(
+                            "Bitwarden: resolved {} ({}/{})",
+                            entry.key,
+                            idx + 1,
+                            uncached_bw_entries.len()
+                        ));
+                        info!("Resolved {} via Bitwarden", entry.key);
+                        if let Some(cache_key) = bw_cache_keys.get(&entry.key) {
+                            secret_cache.set(cache_key, value);
+                        }
+                        log_credential_fetch_audit(
+                            &env_file.path,
+                            dir,
+                            project.as_deref(),
+                            "Bitwarden",
+                            &entry.key,
+                        );
+                        resolved.insert(entry.key.clone(), value.clone());
+                    }
+                    Some(Err(e)) => {
+                        warn!("Failed to resolve {} via Bitwarden: {e}", entry.key);
+                    }
+                    None => {
+                        warn!("No result for {} from Bitwarden batch resolve", entry.key);
+                    }
                 }
             }
+            spinner.finish(format!(
+                "Bitwarden: resolved {}/{} uncached entries",
+                uncached_bw_entries
+                    .iter()
+                    .filter(|entry| resolved.contains_key(&entry.key))
+                    .count(),
+                uncached_bw_entries.len()
+            ));
+            bitwarden_duration_ms += bw_started_at.elapsed().as_millis();
         }
-        spinner.finish(format!(
-            "Bitwarden: resolved {}/{} entries",
-            bw_entries
-                .iter()
-                .filter(|e| resolved.contains_key(&e.key))
-                .count(),
-            bw_entries.len()
-        ));
-        bitwarden_duration_ms += bw_started_at.elapsed().as_millis();
     }
 
     // Resolve empty entries via the default backend
     if !default_entries.is_empty() && !use_bitwarden_batch_for_defaults {
         // For GPG backend, resolve all at once since it decrypts the whole file
         if default_backend_name == "gpg" {
-            let ctx = ResolveContext {
-                dir,
-                config,
-                project: project.clone(),
-                repository: repository.clone(),
-            };
-            match crate::backend::gpg::GpgBackend::resolve_all(&ctx) {
+            let mut uncached_gpg_entries: Vec<&EnvEntry> = Vec::new();
+            let mut gpg_cache_keys: BTreeMap<String, SecretCacheKey> = BTreeMap::new();
+
+            for entry in &default_entries {
+                let cache_key = build_secret_cache_key(&env_file.path, entry, "gpg", &ctx);
+                if let Some(value) = secret_cache.get(&cache_key) {
+                    debug!("Resolved {} via cached GPG value", entry.key);
+                    resolved.insert(entry.key.clone(), value);
+                    continue;
+                }
+
+                gpg_cache_keys.insert(entry.key.clone(), cache_key);
+                uncached_gpg_entries.push(entry);
+            }
+
+            if uncached_gpg_entries.is_empty() {
+                debug!("Resolved all GPG-backed entries from cache");
+            } else {
+                match crate::backend::gpg::GpgBackend::resolve_all(&ctx) {
                 Ok(all_values) => {
-                    for entry in &default_entries {
+                    for entry in &uncached_gpg_entries {
                         if let Some(value) = all_values.get(&entry.key) {
                             info!("Resolved {} via GPG", entry.key);
+                            if let Some(cache_key) = gpg_cache_keys.get(&entry.key) {
+                                secret_cache.set(cache_key, value);
+                            }
                             log_credential_fetch_audit(
                                 &env_file.path,
                                 dir,
@@ -392,19 +476,26 @@ pub fn resolve_env_file(
                     warn!("Failed to decrypt GPG file: {e}");
                 }
             }
+            }
         } else {
             let backend = backend::create_backend(default_backend_name)?;
-            let ctx = ResolveContext {
-                dir,
-                config,
-                project: project.clone(),
-                repository: repository.clone(),
-            };
             let bitwarden_default_started_at = (backend.name() == "Bitwarden").then(Instant::now);
             for entry in &default_entries {
+                let cache_key = build_secret_cache_key(&env_file.path, entry, default_backend_name, &ctx);
+                if let Some(value) = secret_cache.get(&cache_key) {
+                    debug!(
+                        "Resolved {} via cached {} value",
+                        entry.key,
+                        backend.name()
+                    );
+                    resolved.insert(entry.key.clone(), value);
+                    continue;
+                }
+
                 match backend.resolve(&entry.key, None, &ctx) {
                     Ok(value) => {
                         info!("Resolved {} via {}", entry.key, backend.name());
+                        secret_cache.set(&cache_key, &value);
                         log_credential_fetch_audit(
                             &env_file.path,
                             dir,
@@ -787,6 +878,7 @@ mod tests {
     fn with_approval_and_mock_binaries<T, F>(
         op_script: Option<&str>,
         bw_script: Option<&str>,
+        gpg_script: Option<&str>,
         env_path: &std::path::Path,
         f: F,
     ) -> T
@@ -814,7 +906,7 @@ mod tests {
 
         // Install mock binaries ahead of the real ones on PATH.
         let script_dir = tempfile::TempDir::new().expect("should create temp script dir");
-        for (name, script) in [("op", op_script), ("bw", bw_script)] {
+        for (name, script) in [("op", op_script), ("bw", bw_script), ("gpg", gpg_script)] {
             if let Some(src) = script {
                 let p = script_dir.path().join(name);
                 fs::write(&p, src).expect("should write mock script");
@@ -865,7 +957,7 @@ mod tests {
             projects: vec![],
         };
 
-        let resolved = with_approval_and_mock_binaries(Some(op_script), None, &env_path, || {
+        let resolved = with_approval_and_mock_binaries(Some(op_script), None, None, &env_path, || {
             resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
         });
 
@@ -914,7 +1006,7 @@ mod tests {
             projects: vec![],
         };
 
-        let resolved = with_approval_and_mock_binaries(None, Some(&bw_script), &env_path, || {
+        let resolved = with_approval_and_mock_binaries(None, Some(&bw_script), None, &env_path, || {
             resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
         });
 
@@ -953,7 +1045,7 @@ mod tests {
             projects: vec![],
         };
 
-        let resolved = with_approval_and_mock_binaries(Some(op_script), None, &env_path, || {
+        let resolved = with_approval_and_mock_binaries(Some(op_script), None, None, &env_path, || {
             resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
         });
 
@@ -996,7 +1088,7 @@ mod tests {
             projects: vec![],
         };
 
-        let resolved = with_approval_and_mock_binaries(None, Some(&bw_script), &env_path, || {
+        let resolved = with_approval_and_mock_binaries(None, Some(&bw_script), None, &env_path, || {
             resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
         });
 
@@ -1016,6 +1108,212 @@ mod tests {
                 .count(),
             0,
             "default Bitwarden entries should not fall back to per-key search lookups"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_env_file_uses_secret_cache_for_op_entries() {
+        let temp = unique_subdir("resolve-op-cache");
+        let env_path = temp.join(".env");
+        let call_log = temp.join("op-calls.log");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(&env_path, "API_KEY=op://My Vault/my-item/field\n").unwrap();
+
+        let op_script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = 'read' ]; then echo 'op-cache-secret'; else exit 1; fi\n",
+            call_log.display()
+        );
+
+        let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
+        let config = Config {
+            defaults: crate::config::Defaults::default(),
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        crate::cache::set_test_secret_cache_index_path(Some(
+            temp.join("pw-env").join("resolved-secret-cache.json"),
+        ));
+        crate::cache::set_test_keyring_available(true);
+
+        let (first, second) =
+            with_approval_and_mock_binaries(Some(&op_script), None, None, &env_path, || {
+                let first = resolve_env_file(&env_file, &config, &temp).unwrap();
+                let second = resolve_env_file(&env_file, &config, &temp).unwrap();
+                (first, second)
+            });
+
+        crate::cache::reset_test_keyring();
+        crate::cache::set_test_secret_cache_index_path(None);
+
+        let log = fs::read_to_string(&call_log).unwrap();
+        let _ = fs::remove_dir_all(&temp);
+
+        assert_eq!(first.get("API_KEY").map(String::as_str), Some("op-cache-secret"));
+        assert_eq!(second.get("API_KEY").map(String::as_str), Some("op-cache-secret"));
+        assert_eq!(log.lines().count(), 1, "expected exactly one op invocation");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_env_file_uses_secret_cache_for_bitwarden_entries() {
+        let temp = unique_subdir("resolve-bw-cache");
+        let env_path = temp.join(".env");
+        let call_log = temp.join("bw-calls.log");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(&env_path, "API_KEY=\n").unwrap();
+
+        let items_json = r#"[{"name":"API_KEY","folderId":"folder-abc","login":{"password":"bw-cache-secret"},"fields":[]}]"#;
+        let bw_script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = 'status' ]; then\n  echo '{{\"status\":\"unlocked\"}}'\nelif [ \"$1\" = 'sync' ]; then\n  exit 0\nelif [ \"$1\" = 'list' ] && [ \"$2\" = 'folders' ] && [ \"$4\" = 'Secrets' ]; then\n  echo '[{{\"name\":\"Secrets\",\"id\":\"folder-abc\"}}]'\nelif [ \"$1\" = 'list' ] && [ \"$2\" = 'items' ] && [ $# -eq 2 ]; then\n  echo '{}'\nelse\n  exit 1\nfi\n",
+            call_log.display(),
+            items_json
+        );
+
+        let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
+        let config = Config {
+            defaults: crate::config::Defaults {
+                backend: "bw".to_string(),
+                bw: crate::config::BwConfig {
+                    folder: Some("Secrets".to_string()),
+                    ..crate::config::BwConfig::default()
+                },
+                ..crate::config::Defaults::default()
+            },
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        crate::cache::set_test_secret_cache_index_path(Some(
+            temp.join("pw-env").join("resolved-secret-cache.json"),
+        ));
+        crate::cache::set_test_keyring_available(true);
+
+        let (first, second) =
+            with_approval_and_mock_binaries(None, Some(&bw_script), None, &env_path, || {
+                let first = resolve_env_file(&env_file, &config, &temp).unwrap();
+                let second = resolve_env_file(&env_file, &config, &temp).unwrap();
+                (first, second)
+            });
+
+        crate::cache::reset_test_keyring();
+        crate::cache::set_test_secret_cache_index_path(None);
+
+        let log = fs::read_to_string(&call_log).unwrap();
+        let _ = fs::remove_dir_all(&temp);
+
+        assert_eq!(first.get("API_KEY").map(String::as_str), Some("bw-cache-secret"));
+        assert_eq!(second.get("API_KEY").map(String::as_str), Some("bw-cache-secret"));
+        assert_eq!(
+            log.lines().filter(|line| *line == "list items").count(),
+            1,
+            "expected the Bitwarden item list to be fetched only once"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_env_file_uses_secret_cache_for_gpg_entries() {
+        let temp = unique_subdir("resolve-gpg-cache");
+        let env_path = temp.join(".env");
+        let encrypted_path = temp.join(".env.gpg");
+        let call_log = temp.join("gpg-calls.log");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(&env_path, "GPG_KEY=\n").unwrap();
+        fs::write(&encrypted_path, "placeholder").unwrap();
+
+        let gpg_script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = '--decrypt' ]; then\n  printf 'GPG_KEY=gpg-cache-secret\\n'\n  exit 0\nfi\nexit 1\n",
+            call_log.display()
+        );
+
+        let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
+        let config = Config {
+            defaults: crate::config::Defaults {
+                backend: "gpg".to_string(),
+                ..crate::config::Defaults::default()
+            },
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        crate::cache::set_test_secret_cache_index_path(Some(
+            temp.join("pw-env").join("resolved-secret-cache.json"),
+        ));
+        crate::cache::set_test_keyring_available(true);
+
+        let (first, second) =
+            with_approval_and_mock_binaries(None, None, Some(&gpg_script), &env_path, || {
+                let first = resolve_env_file(&env_file, &config, &temp).unwrap();
+                let second = resolve_env_file(&env_file, &config, &temp).unwrap();
+                (first, second)
+            });
+
+        crate::cache::reset_test_keyring();
+        crate::cache::set_test_secret_cache_index_path(None);
+
+        let log = fs::read_to_string(&call_log).unwrap();
+        let _ = fs::remove_dir_all(&temp);
+
+        assert_eq!(first.get("GPG_KEY").map(String::as_str), Some("gpg-cache-secret"));
+        assert_eq!(second.get("GPG_KEY").map(String::as_str), Some("gpg-cache-secret"));
+        assert_eq!(
+            log.lines().filter(|line| line.starts_with("--decrypt")).count(),
+            1,
+            "expected a single gpg decrypt across cached resolves"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_env_file_falls_back_when_keyring_is_unavailable() {
+        let temp = unique_subdir("resolve-cache-unavailable");
+        let env_path = temp.join(".env");
+        let call_log = temp.join("op-calls.log");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(&env_path, "API_KEY=op://My Vault/my-item/field\n").unwrap();
+
+        let op_script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = 'read' ]; then echo 'op-fallback-secret'; else exit 1; fi\n",
+            call_log.display()
+        );
+
+        let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
+        let config = Config {
+            defaults: crate::config::Defaults::default(),
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        crate::cache::set_test_secret_cache_index_path(Some(
+            temp.join("pw-env").join("resolved-secret-cache.json"),
+        ));
+        crate::cache::set_test_keyring_available(false);
+
+        let (first, second) =
+            with_approval_and_mock_binaries(Some(&op_script), None, None, &env_path, || {
+                let first = resolve_env_file(&env_file, &config, &temp).unwrap();
+                let second = resolve_env_file(&env_file, &config, &temp).unwrap();
+                (first, second)
+            });
+
+        crate::cache::reset_test_keyring();
+        crate::cache::set_test_secret_cache_index_path(None);
+
+        let log = fs::read_to_string(&call_log).unwrap();
+        let _ = fs::remove_dir_all(&temp);
+
+        assert_eq!(first.get("API_KEY").map(String::as_str), Some("op-fallback-secret"));
+        assert_eq!(second.get("API_KEY").map(String::as_str), Some("op-fallback-secret"));
+        assert_eq!(
+            log.lines().count(),
+            2,
+            "expected backend resolution to continue when the keyring is unavailable"
         );
     }
 }
