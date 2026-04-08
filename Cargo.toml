@@ -8,7 +8,7 @@ name = "pw-env"
 path = "src/main.rs"
 
 [dependencies]
-mutants = "0.0.3"
+mutants = "0.0.4"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
