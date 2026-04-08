@@ -73,6 +73,10 @@ eval "$(pw-env export . --shell bash)"
 pw-env export . --shell fish | source
 ```
 
+```powershell [powershell]
+Invoke-Expression (& pw-env export . --shell powershell)
+```
+
 :::
 
 The first time a project `.env` would trigger secret fetching, pw-env asks you to approve it. The default approval is
@@ -91,11 +95,53 @@ resolved values.
 
 ## 5. Install automatic loading when you are ready
 
-```console
+::: code-group
+
+```console [bash]
 eval "$(pw-env init bash)"
 ```
 
-Swap `bash` for `zsh` or `fish` as needed. See [Shell integration](shell-integration.md) for the full behavior.
+```console [zsh]
+eval "$(pw-env init zsh)"
+```
+
+```console [fish]
+pw-env init fish | source
+```
+
+```powershell [powershell]
+Invoke-Expression (& pw-env init powershell)
+```
+
+:::
+
+Add the same command to your shell startup file so the hook is installed in every new session. For PowerShell, add it
+to your `$PROFILE` file.
+
+To enable tab completion for pw-env commands, generate the completion script once and source it from the same startup
+file:
+
+::: code-group
+
+```console [bash]
+eval "$(pw-env completions bash)"
+```
+
+```console [zsh]
+eval "$(pw-env completions zsh)"
+```
+
+```console [fish]
+pw-env completions fish | source
+```
+
+```powershell [powershell]
+Invoke-Expression (& pw-env completions powershell)
+```
+
+:::
+
+See [Shell integration](shell-integration.md) for the full hook behavior.
 
 ## Next steps
 
