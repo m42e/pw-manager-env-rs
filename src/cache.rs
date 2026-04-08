@@ -47,7 +47,7 @@ impl SecretCacheKey {
             .into_bytes()
         });
         let digest = Sha256::digest(serialized);
-        format!("{:x}", digest)
+        digest.iter().map(|b| format!("{b:02x}")).collect()
     }
 }
 
@@ -104,9 +104,7 @@ impl SecretValueCache {
         }
 
         let fingerprint = key.fingerprint();
-        let Some(entry) = self.index.entries.get(&fingerprint).cloned() else {
-            return None;
-        };
+        let entry = self.index.entries.get(&fingerprint).cloned()?;
 
         if self.is_expired(entry.cached_at_unix_secs) {
             debug!("Resolved-secret cache expired for {}", key.entry_key);
@@ -173,10 +171,18 @@ impl SecretCacheIndex {
             return Ok(Self::default());
         }
 
-        let contents = std::fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read resolved-secret cache index from {}", path.display()))?;
-        serde_json::from_str(&contents)
-            .with_context(|| format!("Failed to parse resolved-secret cache index from {}", path.display()))
+        let contents = std::fs::read_to_string(&path).with_context(|| {
+            format!(
+                "Failed to read resolved-secret cache index from {}",
+                path.display()
+            )
+        })?;
+        serde_json::from_str(&contents).with_context(|| {
+            format!(
+                "Failed to parse resolved-secret cache index from {}",
+                path.display()
+            )
+        })
     }
 
     fn save(&self) -> Result<()> {
@@ -185,14 +191,19 @@ impl SecretCacheIndex {
         };
 
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create state directory {}", parent.display()))?;
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create state directory {}", parent.display())
+            })?;
         }
 
         let contents = serde_json::to_string_pretty(self)
             .context("Failed to serialize resolved-secret cache index")?;
-        write_private_file(&path, &contents)
-            .with_context(|| format!("Failed to write resolved-secret cache index to {}", path.display()))
+        write_private_file(&path, &contents).with_context(|| {
+            format!(
+                "Failed to write resolved-secret cache index to {}",
+                path.display()
+            )
+        })
     }
 
     fn path() -> Option<PathBuf> {
@@ -225,12 +236,16 @@ pub fn clear_secret_cache() -> Result<ClearSecretCacheResult> {
         }
     }
 
-    if let Some(path) = path {
-        if path.exists() {
-            std::fs::remove_file(&path)
-                .with_context(|| format!("Failed to remove resolved-secret cache index {}", path.display()))?;
-            result.cleared_index_file = true;
-        }
+    if let Some(path) = path
+        && path.exists()
+    {
+        std::fs::remove_file(&path).with_context(|| {
+            format!(
+                "Failed to remove resolved-secret cache index {}",
+                path.display()
+            )
+        })?;
+        result.cleared_index_file = true;
     }
 
     Ok(result)
@@ -251,8 +266,8 @@ fn get_secret(fingerprint: &str) -> std::result::Result<Option<String>, KeyringA
         return Err(KeyringAccess::Unavailable);
     }
 
-    let entry = keyring::Entry::new(SECRET_CACHE_SERVICE, fingerprint)
-        .map_err(handle_keyring_error)?;
+    let entry =
+        keyring::Entry::new(SECRET_CACHE_SERVICE, fingerprint).map_err(handle_keyring_error)?;
     match entry.get_password() {
         Ok(value) => Ok(Some(value)),
         Err(keyring::Error::NoEntry) => Ok(None),
@@ -270,8 +285,8 @@ fn set_secret(fingerprint: &str, value: &str) -> std::result::Result<(), Keyring
         return Err(KeyringAccess::Unavailable);
     }
 
-    let entry = keyring::Entry::new(SECRET_CACHE_SERVICE, fingerprint)
-        .map_err(handle_keyring_error)?;
+    let entry =
+        keyring::Entry::new(SECRET_CACHE_SERVICE, fingerprint).map_err(handle_keyring_error)?;
     entry.set_password(value).map_err(handle_keyring_error)
 }
 
@@ -285,8 +300,8 @@ fn delete_secret(fingerprint: &str) -> std::result::Result<bool, KeyringAccess> 
         return Err(KeyringAccess::Unavailable);
     }
 
-    let entry = keyring::Entry::new(SECRET_CACHE_SERVICE, fingerprint)
-        .map_err(handle_keyring_error)?;
+    let entry =
+        keyring::Entry::new(SECRET_CACHE_SERVICE, fingerprint).map_err(handle_keyring_error)?;
     match entry.delete_credential() {
         Ok(()) => Ok(true),
         Err(keyring::Error::NoEntry) => Ok(false),
@@ -335,9 +350,9 @@ fn test_keyring_get(
     TEST_KEYRING_STATE.with(|state| match state.borrow().clone() {
         None => None,
         Some(TestKeyringState::Unavailable) => Some(Err(KeyringAccess::Unavailable)),
-        Some(TestKeyringState::Available) => Some(Ok(TEST_KEYRING_VALUES.with(|values| {
-            values.borrow().get(fingerprint).cloned()
-        }))),
+        Some(TestKeyringState::Available) => Some(Ok(
+            TEST_KEYRING_VALUES.with(|values| values.borrow().get(fingerprint).cloned())
+        )),
     })
 }
 
@@ -358,15 +373,15 @@ fn test_keyring_set(
 }
 
 #[cfg(test)]
-fn test_keyring_delete(
-    fingerprint: &str,
-) -> Option<std::result::Result<bool, KeyringAccess>> {
+fn test_keyring_delete(fingerprint: &str) -> Option<std::result::Result<bool, KeyringAccess>> {
     TEST_KEYRING_STATE.with(|state| match state.borrow().clone() {
         None => None,
         Some(TestKeyringState::Unavailable) => Some(Err(KeyringAccess::Unavailable)),
-        Some(TestKeyringState::Available) => Some(Ok(TEST_KEYRING_VALUES.with(|values| {
-            values.borrow_mut().remove(fingerprint).is_some()
-        }))),
+        Some(TestKeyringState::Available) => {
+            Some(Ok(TEST_KEYRING_VALUES.with(|values| {
+                values.borrow_mut().remove(fingerprint).is_some()
+            })))
+        }
     })
 }
 

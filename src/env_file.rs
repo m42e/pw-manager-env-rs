@@ -469,7 +469,11 @@ fn review_fingerprint(key: &str, value: &str) -> String {
     hasher.update(key.as_bytes());
     hasher.update([0]);
     hasher.update(value.trim().as_bytes());
-    format!("{:x}", hasher.finalize())
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 #[cfg(test)]

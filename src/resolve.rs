@@ -452,42 +452,39 @@ pub fn resolve_env_file(
                 debug!("Resolved all GPG-backed entries from cache");
             } else {
                 match crate::backend::gpg::GpgBackend::resolve_all(&ctx) {
-                Ok(all_values) => {
-                    for entry in &uncached_gpg_entries {
-                        if let Some(value) = all_values.get(&entry.key) {
-                            info!("Resolved {} via GPG", entry.key);
-                            if let Some(cache_key) = gpg_cache_keys.get(&entry.key) {
-                                secret_cache.set(cache_key, value);
+                    Ok(all_values) => {
+                        for entry in &uncached_gpg_entries {
+                            if let Some(value) = all_values.get(&entry.key) {
+                                info!("Resolved {} via GPG", entry.key);
+                                if let Some(cache_key) = gpg_cache_keys.get(&entry.key) {
+                                    secret_cache.set(cache_key, value);
+                                }
+                                log_credential_fetch_audit(
+                                    &env_file.path,
+                                    dir,
+                                    project.as_deref(),
+                                    "GPG",
+                                    &entry.key,
+                                );
+                                resolved.insert(entry.key.clone(), value.clone());
+                            } else {
+                                warn!("Key '{}' not found in GPG encrypted file", entry.key);
                             }
-                            log_credential_fetch_audit(
-                                &env_file.path,
-                                dir,
-                                project.as_deref(),
-                                "GPG",
-                                &entry.key,
-                            );
-                            resolved.insert(entry.key.clone(), value.clone());
-                        } else {
-                            warn!("Key '{}' not found in GPG encrypted file", entry.key);
                         }
                     }
+                    Err(e) => {
+                        warn!("Failed to decrypt GPG file: {e}");
+                    }
                 }
-                Err(e) => {
-                    warn!("Failed to decrypt GPG file: {e}");
-                }
-            }
             }
         } else {
             let backend = backend::create_backend(default_backend_name)?;
             let bitwarden_default_started_at = (backend.name() == "Bitwarden").then(Instant::now);
             for entry in &default_entries {
-                let cache_key = build_secret_cache_key(&env_file.path, entry, default_backend_name, &ctx);
+                let cache_key =
+                    build_secret_cache_key(&env_file.path, entry, default_backend_name, &ctx);
                 if let Some(value) = secret_cache.get(&cache_key) {
-                    debug!(
-                        "Resolved {} via cached {} value",
-                        entry.key,
-                        backend.name()
-                    );
+                    debug!("Resolved {} via cached {} value", entry.key, backend.name());
                     resolved.insert(entry.key.clone(), value);
                     continue;
                 }
@@ -957,9 +954,10 @@ mod tests {
             projects: vec![],
         };
 
-        let resolved = with_approval_and_mock_binaries(Some(op_script), None, None, &env_path, || {
-            resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
-        });
+        let resolved =
+            with_approval_and_mock_binaries(Some(op_script), None, None, &env_path, || {
+                resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
+            });
 
         let _ = fs::remove_dir_all(&temp);
         assert_eq!(
@@ -1006,9 +1004,10 @@ mod tests {
             projects: vec![],
         };
 
-        let resolved = with_approval_and_mock_binaries(None, Some(&bw_script), None, &env_path, || {
-            resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
-        });
+        let resolved =
+            with_approval_and_mock_binaries(None, Some(&bw_script), None, &env_path, || {
+                resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
+            });
 
         let _ = fs::remove_dir_all(&temp);
         assert_eq!(
@@ -1045,9 +1044,10 @@ mod tests {
             projects: vec![],
         };
 
-        let resolved = with_approval_and_mock_binaries(Some(op_script), None, None, &env_path, || {
-            resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
-        });
+        let resolved =
+            with_approval_and_mock_binaries(Some(op_script), None, None, &env_path, || {
+                resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
+            });
 
         let _ = fs::remove_dir_all(&temp);
         assert_eq!(
@@ -1088,15 +1088,22 @@ mod tests {
             projects: vec![],
         };
 
-        let resolved = with_approval_and_mock_binaries(None, Some(&bw_script), None, &env_path, || {
-            resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
-        });
+        let resolved =
+            with_approval_and_mock_binaries(None, Some(&bw_script), None, &env_path, || {
+                resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
+            });
 
         let log = fs::read_to_string(&call_log).unwrap();
 
         let _ = fs::remove_dir_all(&temp);
-        assert_eq!(resolved.get("API_KEY").map(String::as_str), Some("api-secret"));
-        assert_eq!(resolved.get("DB_PASS").map(String::as_str), Some("db-secret"));
+        assert_eq!(
+            resolved.get("API_KEY").map(String::as_str),
+            Some("api-secret")
+        );
+        assert_eq!(
+            resolved.get("DB_PASS").map(String::as_str),
+            Some("db-secret")
+        );
         assert_eq!(
             log.lines().filter(|line| *line == "list items").count(),
             1,
@@ -1151,8 +1158,14 @@ mod tests {
         let log = fs::read_to_string(&call_log).unwrap();
         let _ = fs::remove_dir_all(&temp);
 
-        assert_eq!(first.get("API_KEY").map(String::as_str), Some("op-cache-secret"));
-        assert_eq!(second.get("API_KEY").map(String::as_str), Some("op-cache-secret"));
+        assert_eq!(
+            first.get("API_KEY").map(String::as_str),
+            Some("op-cache-secret")
+        );
+        assert_eq!(
+            second.get("API_KEY").map(String::as_str),
+            Some("op-cache-secret")
+        );
         assert_eq!(log.lines().count(), 1, "expected exactly one op invocation");
     }
 
@@ -1205,8 +1218,14 @@ mod tests {
         let log = fs::read_to_string(&call_log).unwrap();
         let _ = fs::remove_dir_all(&temp);
 
-        assert_eq!(first.get("API_KEY").map(String::as_str), Some("bw-cache-secret"));
-        assert_eq!(second.get("API_KEY").map(String::as_str), Some("bw-cache-secret"));
+        assert_eq!(
+            first.get("API_KEY").map(String::as_str),
+            Some("bw-cache-secret")
+        );
+        assert_eq!(
+            second.get("API_KEY").map(String::as_str),
+            Some("bw-cache-secret")
+        );
         assert_eq!(
             log.lines().filter(|line| *line == "list items").count(),
             1,
@@ -1259,10 +1278,18 @@ mod tests {
         let log = fs::read_to_string(&call_log).unwrap();
         let _ = fs::remove_dir_all(&temp);
 
-        assert_eq!(first.get("GPG_KEY").map(String::as_str), Some("gpg-cache-secret"));
-        assert_eq!(second.get("GPG_KEY").map(String::as_str), Some("gpg-cache-secret"));
         assert_eq!(
-            log.lines().filter(|line| line.starts_with("--decrypt")).count(),
+            first.get("GPG_KEY").map(String::as_str),
+            Some("gpg-cache-secret")
+        );
+        assert_eq!(
+            second.get("GPG_KEY").map(String::as_str),
+            Some("gpg-cache-secret")
+        );
+        assert_eq!(
+            log.lines()
+                .filter(|line| line.starts_with("--decrypt"))
+                .count(),
             1,
             "expected a single gpg decrypt across cached resolves"
         );
@@ -1308,8 +1335,14 @@ mod tests {
         let log = fs::read_to_string(&call_log).unwrap();
         let _ = fs::remove_dir_all(&temp);
 
-        assert_eq!(first.get("API_KEY").map(String::as_str), Some("op-fallback-secret"));
-        assert_eq!(second.get("API_KEY").map(String::as_str), Some("op-fallback-secret"));
+        assert_eq!(
+            first.get("API_KEY").map(String::as_str),
+            Some("op-fallback-secret")
+        );
+        assert_eq!(
+            second.get("API_KEY").map(String::as_str),
+            Some("op-fallback-secret")
+        );
         assert_eq!(
             log.lines().count(),
             2,

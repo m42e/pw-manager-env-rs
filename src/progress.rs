@@ -230,7 +230,9 @@ mod tests {
 
     #[test]
     fn suspend_progress_output_clears_visible_status_line() {
-        let _test_guard = test_mutex().lock().unwrap_or_else(|poison| poison.into_inner());
+        let _test_guard = test_mutex()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         reset_terminal_output_state();
 
         {
@@ -264,7 +266,9 @@ mod tests {
 
     #[test]
     fn suspend_progress_output_is_reentrant() {
-        let _test_guard = test_mutex().lock().unwrap_or_else(|poison| poison.into_inner());
+        let _test_guard = test_mutex()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         reset_terminal_output_state();
 
         let mut first_output = Vec::new();

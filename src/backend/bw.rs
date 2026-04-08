@@ -905,8 +905,7 @@ impl BwBackend {
         folder_id: Option<&str>,
         project: Option<&str>,
     ) -> Result<String> {
-        let Some(item) =
-            Self::resolve_reference_item(item_name, repository, folder_id, project)?
+        let Some(item) = Self::resolve_reference_item(item_name, repository, folder_id, project)?
         else {
             return Ok(String::new());
         };
@@ -1047,9 +1046,8 @@ impl BwBackend {
                             Ok(folder_id) => {
                                 let cache_key = (folder_id.clone(), item_name.to_string());
                                 let folder_id_for_lookup = folder_id.clone();
-                                let cached_item = reference_item_cache
-                                    .entry(cache_key)
-                                    .or_insert_with(|| {
+                                let cached_item =
+                                    reference_item_cache.entry(cache_key).or_insert_with(|| {
                                         Self::resolve_reference_item(
                                             item_name,
                                             ctx.repository.as_deref(),

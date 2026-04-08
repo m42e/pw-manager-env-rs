@@ -1246,7 +1246,7 @@ fn validate_project_override(path: &Path) -> Result<ProjectDirectoryOverride> {
 
 fn sha256_hex(contents: &str) -> String {
     let digest = Sha256::digest(contents.as_bytes());
-    format!("{digest:x}")
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn find_git_root(dir: &Path) -> Option<PathBuf> {
