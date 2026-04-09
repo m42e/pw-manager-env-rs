@@ -1,0 +1,43 @@
+name: Mutation Testing (PR)
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  incremental-mutants:
+    name: Incremental Mutation Testing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # pin: v6.0.2
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # pin: v1
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # pin: v2.9.1
+
+      - name: Install Linux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      - name: Compute diff
+        run: git diff origin/${{ github.base_ref }}.. | tee git.diff
+
+      - name: Run incremental mutation tests
+        run: cargo mutants --no-shuffle -vV --in-diff git.diff
+
+      - name: Upload mutants.out
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: mutants-incremental.out
+          path: mutants.out/
