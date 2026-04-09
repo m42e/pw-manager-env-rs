@@ -1793,6 +1793,7 @@ mod tests {
                 commands: vec!["cat".to_string()],
                 backend: None,
                 search_parent_env: None,
+                source_all: None,
                 cache: None,
                 op: None,
                 bw: None,

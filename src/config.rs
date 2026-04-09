@@ -145,6 +145,10 @@ pub struct Defaults {
     pub backend: String,
     #[serde(default = "default_search_parent_env")]
     pub search_parent_env: bool,
+    /// When true, plaintext (non-secret) values from `.env` are also exported
+    /// alongside the resolved secret values.
+    #[serde(default)]
+    pub source_all: bool,
     #[serde(default)]
     pub cache: CacheConfig,
     #[serde(default)]
@@ -160,6 +164,7 @@ impl Default for Defaults {
         Self {
             backend: default_backend(),
             search_parent_env: default_search_parent_env(),
+            source_all: false,
             cache: CacheConfig::default(),
             op: OpConfig::default(),
             bw: BwConfig::default(),
@@ -300,6 +305,8 @@ pub struct ProjectOverride {
     #[serde(default)]
     pub search_parent_env: Option<bool>,
     #[serde(default)]
+    pub source_all: Option<bool>,
+    #[serde(default)]
     pub cache: Option<CacheConfig>,
     #[serde(default)]
     pub op: Option<OpConfig>,
@@ -320,6 +327,8 @@ struct ProjectDirectoryOverride {
     pub backend: Option<String>,
     #[serde(default)]
     pub search_parent_env: Option<bool>,
+    #[serde(default)]
+    pub source_all: Option<bool>,
     #[serde(default)]
     pub cache: Option<CacheConfig>,
     #[serde(default)]
@@ -390,6 +399,7 @@ impl Config {
                 path: project_dir.to_string_lossy().into_owned(),
                 backend: local_override.backend,
                 search_parent_env: local_override.search_parent_env,
+                source_all: local_override.source_all,
                 cache: local_override.cache,
                 op: local_override.op,
                 bw: local_override.bw,
@@ -695,6 +705,13 @@ impl Config {
         self.project_for(dir)
             .and_then(|project| project.search_parent_env)
             .unwrap_or(self.defaults.search_parent_env)
+    }
+
+    /// Resolve whether plaintext values should also be exported for a given directory.
+    pub fn effective_source_all(&self, dir: &Path) -> bool {
+        self.project_for(dir)
+            .and_then(|project| project.source_all)
+            .unwrap_or(self.defaults.source_all)
     }
 
     fn project_index_for(&self, dir: &Path) -> Option<usize> {
@@ -1797,6 +1814,70 @@ vault = "Work"
     }
 
     #[test]
+    fn test_effective_source_all_defaults_to_false() {
+        let config = Config {
+            defaults: Defaults::default(),
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+        assert!(!config.effective_source_all(Path::new("/any/dir")));
+    }
+
+    #[test]
+    fn test_effective_source_all_uses_defaults_when_enabled() {
+        let config = Config {
+            defaults: Defaults {
+                source_all: true,
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+        assert!(config.effective_source_all(Path::new("/any/dir")));
+    }
+
+    #[test]
+    fn test_effective_source_all_project_override_takes_precedence() {
+        let config = Config {
+            defaults: Defaults {
+                source_all: false,
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![ProjectOverride {
+                path: "/home/user/work".to_string(),
+                source_all: Some(true),
+                ..ProjectOverride::default()
+            }],
+        };
+        assert!(config.effective_source_all(Path::new("/home/user/work/api")));
+        assert!(!config.effective_source_all(Path::new("/home/user/other")));
+    }
+
+    #[test]
+    fn test_source_all_parsed_from_toml() {
+        let toml_str = r#"
+[defaults]
+source_all = true
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.defaults.source_all);
+    }
+
+    #[test]
+    fn test_source_all_defaults_to_false_when_omitted_from_toml() {
+        let toml_str = r#"
+[defaults]
+backend = "op"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(!config.defaults.source_all);
+    }
+
+    #[test]
     fn test_config_path_contains_pw_env_and_toml() {
         let path = Config::config_path();
         let s = path.to_string_lossy();
@@ -2192,6 +2273,7 @@ vault = "Work"
                 commands: vec!["echo".to_string(), "cat".to_string()],
                 backend: None,
                 search_parent_env: None,
+                source_all: None,
                 cache: None,
                 op: None,
                 bw: None,

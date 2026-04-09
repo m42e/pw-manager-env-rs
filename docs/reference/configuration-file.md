@@ -13,6 +13,8 @@ The main config file lives at `~/.config/pw-env/config.toml` unless `XDG_CONFIG_
 backend = "op"
 # Search parent directories for .env until the git workspace root
 # search_parent_env = true
+# Also export plaintext (non-secret) values from .env alongside resolved secrets
+# source_all = false
 
 [defaults.cache]
 # Cache resolved secret values in the OS keyring when available
@@ -84,14 +86,14 @@ check_interval_hours = 24
 
 | Section | Keys | Notes |
 | --- | --- | --- |
-| `[defaults]` | `backend`, `search_parent_env` | Selects the default backend for empty `.env` values and controls parent `.env` discovery |
+| `[defaults]` | `backend`, `search_parent_env`, `source_all` | Selects the default backend for empty `.env` values, controls parent `.env` discovery, and controls whether plaintext values are exported |
 | `[defaults.cache]` | `enabled`, `ttl_hours` | Enables OS-keyring caching of resolved secrets and sets the expiry window |
 | `[defaults.op]` | `vault`, `account`, `item` | Default 1Password lookup settings |
 | `[defaults.bw]` | `folder`, `organization`, `item` | Default Bitwarden lookup settings |
 | `[defaults.gpg]` | `file_pattern`, `recipient` | GPG file matching and encryption settings |
 | `[log]` | `level`, `file` | Logging configuration and audit-log destination |
 | `[updates]` | `enabled`, `check_interval_hours` | Automatic GitHub release checks |
-| `[[projects]]` | `path`, `backend`, `search_parent_env`, `item`, `commands` | Per-path overrides; most specific path prefix wins |
+| `[[projects]]` | `path`, `backend`, `search_parent_env`, `source_all`, `item`, `commands` | Per-path overrides; most specific path prefix wins |
 | `[projects.cache]`, `[projects.op]`, `[projects.bw]`, `[projects.gpg]` | backend-specific keys | Extra settings for the most recent `[[projects]]` block |
 
 ## Valid backend values
@@ -106,6 +108,7 @@ repository.
 ```toml [.pw-env.toml]
 backend = "op"
 search_parent_env = true
+source_all = false
 item = "api-server-env"
 commands = ["cargo", "npm"]
 
@@ -125,6 +128,11 @@ pw-env loads the local override only after the current file contents are approve
 When `search_parent_env` is `true`, pw-env walks upward from the working directory until it finds the first `.env`
 file or reaches the enclosing git workspace root. Nested git markers such as submodules do not stop the walk early;
 pw-env stops at the highest ancestor git root.
+
+When `source_all` is `true`, pw-env exports all entries from the `.env` file — not just the ones resolved from a
+backend. Entries with plaintext values (e.g. `LOG_LEVEL=debug`) are included in the shell exports or injected into
+the child process alongside the secret values. The default is `false`, which means only backend-resolved entries are
+exported.
 
 When `[defaults.cache]` or `[cache]` is enabled, pw-env stores resolved secret values in the OS keyring when that
 secure store is available. If the keyring is unavailable, pw-env keeps resolving from the backend normally and simply

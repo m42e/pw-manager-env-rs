@@ -251,6 +251,8 @@ fn build_secret_cache_key(
 
 /// Resolve all entries from an .env file to their secret values.
 /// Returns a map of KEY -> resolved_value.
+/// When `config.effective_source_all(dir)` is true, plaintext (non-secret) values from the
+/// `.env` file are also included in the returned map alongside the resolved secret values.
 pub fn resolve_env_file(
     env_file: &EnvFile,
     config: &Config,
@@ -259,10 +261,23 @@ pub fn resolve_env_file(
     let started_at = Instant::now();
     let mut resolved = BTreeMap::new();
     let mut bitwarden_duration_ms = 0u128;
+    let source_all = config.effective_source_all(dir);
     let entries = env_file.resolvable_entries();
 
-    if entries.is_empty() {
+    if entries.is_empty() && !source_all {
         debug!("No resolvable entries found in .env file");
+        return Ok(resolved);
+    }
+
+    // When source_all is enabled but there are no resolvable (secret) entries,
+    // skip backend resolution and just return the plaintext values.
+    if entries.is_empty() {
+        debug!("No resolvable entries found; returning plaintext values via source_all");
+        for entry in env_file.entries() {
+            if let EntryKind::Plaintext(value) = &entry.kind {
+                resolved.insert(entry.key.clone(), value.clone());
+            }
+        }
         return Ok(resolved);
     }
 
@@ -513,6 +528,16 @@ pub fn resolve_env_file(
             }
             if let Some(backend_started_at) = bitwarden_default_started_at {
                 bitwarden_duration_ms += backend_started_at.elapsed().as_millis();
+            }
+        }
+    }
+
+    // When source_all is enabled, include plaintext (non-secret) values in the output.
+    // Secret-resolved entries take precedence; plaintext values fill in the rest.
+    if source_all {
+        for entry in env_file.entries() {
+            if let EntryKind::Plaintext(value) = &entry.kind {
+                resolved.entry(entry.key.clone()).or_insert_with(|| value.clone());
             }
         }
     }
@@ -770,6 +795,60 @@ mod tests {
         assert!(
             resolved.is_empty(),
             "expected empty map for all-plaintext file"
+        );
+    }
+
+    #[test]
+    fn resolve_env_file_with_source_all_includes_plaintext_entries() {
+        let temp = unique_subdir("resolve-source-all-plaintext");
+        let env_path = temp.join(".env");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(
+            &env_path,
+            "LOG_LEVEL=debug\nAPP_ENV=production\n",
+        )
+        .unwrap();
+
+        let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
+        let config = Config {
+            defaults: crate::config::Defaults {
+                source_all: true,
+                ..crate::config::Defaults::default()
+            },
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+        let result = resolve_env_file(&env_file, &config, &temp);
+        let _ = fs::remove_dir_all(&temp);
+        let resolved = result.unwrap();
+        assert_eq!(resolved.get("LOG_LEVEL").map(String::as_str), Some("debug"));
+        assert_eq!(
+            resolved.get("APP_ENV").map(String::as_str),
+            Some("production")
+        );
+    }
+
+    #[test]
+    fn resolve_env_file_without_source_all_omits_plaintext_entries() {
+        let temp = unique_subdir("resolve-no-source-all-plaintext");
+        let env_path = temp.join(".env");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(&env_path, "LOG_LEVEL=debug\nAPP_ENV=production\n").unwrap();
+
+        let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
+        let config = Config {
+            defaults: crate::config::Defaults::default(), // source_all = false
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+        let result = resolve_env_file(&env_file, &config, &temp);
+        let _ = fs::remove_dir_all(&temp);
+        let resolved = result.unwrap();
+        assert!(
+            resolved.is_empty(),
+            "expected plaintext entries to be omitted when source_all is false"
         );
     }
 
