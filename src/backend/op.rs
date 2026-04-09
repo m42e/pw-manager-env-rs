@@ -714,4 +714,254 @@ mod tests {
             assert_eq!(result.unwrap(), "field-value");
         });
     }
+
+    // Kills mutants: 147 (== → !=), 168 (delete !), 171 (== → !=) in resolve_by_metadata.
+    //
+    // 3 items share the title "MY_KEY":
+    //   item-a: repo=test-repo, project=other-project
+    //   item-b: repo=test-repo, project=test-project  ← correct answer
+    //   item-c: repo=other-repo, project=test-project
+    //
+    // Repository filter narrows to [item-a, item-b] (len=2, so no early return at line 147).
+    // Project filter narrows to [item-b] (len=1, returns b-password at line 171).
+    #[test]
+    fn resolve_by_metadata_narrows_by_repo_then_project() {
+        let script = "#!/bin/sh\n\
+            if [ \"$2\" = \"list\" ]; then\n\
+              echo '[{\"id\":\"item-a\",\"title\":\"MY_KEY\"},{\"id\":\"item-b\",\"title\":\"MY_KEY\"},{\"id\":\"item-c\",\"title\":\"MY_KEY\"}]'\n\
+              exit 0\n\
+            fi\n\
+            if [ \"$2\" = \"get\" ] && [ \"$4\" = \"--format=json\" ]; then\n\
+              case \"$3\" in\n\
+                item-a) echo '{\"id\":\"item-a\",\"fields\":[{\"label\":\"repository\",\"value\":\"test-repo\"},{\"label\":\"project\",\"value\":\"other-project\"}]}' ;;\n\
+                item-b) echo '{\"id\":\"item-b\",\"fields\":[{\"label\":\"repository\",\"value\":\"test-repo\"},{\"label\":\"project\",\"value\":\"test-project\"}]}' ;;\n\
+                item-c) echo '{\"id\":\"item-c\",\"fields\":[{\"label\":\"repository\",\"value\":\"other-repo\"},{\"label\":\"project\",\"value\":\"test-project\"}]}' ;;\n\
+                *) echo 'unknown item' >&2; exit 1 ;;\n\
+              esac\n\
+              exit 0\n\
+            fi\n\
+            if [ \"$2\" = \"get\" ] && [ \"$4\" = \"--fields\" ]; then\n\
+              case \"$3\" in\n\
+                item-a) echo 'a-password' ;;\n\
+                item-b) echo 'b-password' ;;\n\
+                item-c) echo 'c-password' ;;\n\
+                *) echo 'unknown item' >&2; exit 1 ;;\n\
+              esac\n\
+              exit 0\n\
+            fi\n\
+            echo 'unexpected command' >&2\n\
+            exit 1\n";
+        with_mock_op(script, || {
+            let result = OpBackend::resolve_by_metadata(
+                "MY_KEY",
+                Some("test-repo"),
+                Some("test-project"),
+                None,
+                None,
+            );
+            assert_eq!(result.unwrap(), "b-password");
+        });
+    }
+
+    // Kills mutant 215: match guard `contains("more than 1 item")` replaced with `true`.
+    // A non-"more than 1 item" error must be returned directly, not trigger disambiguation.
+    #[test]
+    fn backend_resolve_with_vault_non_multiple_item_error_propagated() {
+        let script = "#!/bin/sh\n\
+            if [ \"$2\" = \"get\" ] && [ \"$3\" = \"MY_KEY\" ]; then\n\
+              echo 'item not found' >&2\n\
+              exit 1\n\
+            fi\n\
+            if [ \"$2\" = \"list\" ]; then\n\
+              echo '[{\"id\":\"abc\",\"title\":\"MY_KEY\"}]'\n\
+              exit 0\n\
+            fi\n\
+            echo 'found-via-disambiguation'\n";
+        with_mock_op(script, || {
+            let config = Config {
+                defaults: Defaults {
+                    op: crate::config::OpConfig {
+                        vault: Some("MyVault".to_string()),
+                        ..Default::default()
+                    },
+                    ..Defaults::default()
+                },
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = make_op_resolve_context(&config, Path::new("/tmp"));
+            let result = OpBackend.resolve("MY_KEY", None, &ctx);
+            let err = result.unwrap_err();
+            assert!(
+                format!("{err}").to_lowercase().contains("item not found"),
+                "unexpected error: {err}"
+            );
+        });
+    }
+
+    // Kills mutant 216: `||` replaced with `&&` in the vault branch.
+    // Disambiguation must trigger when only repository is set (project is None).
+    #[test]
+    fn backend_resolve_with_vault_disambiguates_when_only_repository_set() {
+        let script = "#!/bin/sh\n\
+            if [ \"$2\" = \"get\" ] && [ \"$3\" = \"MY_KEY\" ]; then\n\
+              echo 'more than 1 item found' >&2\n\
+              exit 1\n\
+            fi\n\
+            if [ \"$2\" = \"list\" ]; then\n\
+              echo '[{\"id\":\"abc\",\"title\":\"MY_KEY\"}]'\n\
+              exit 0\n\
+            fi\n\
+            echo 'resolved-value'\n";
+        with_mock_op(script, || {
+            let config = Config {
+                defaults: Defaults {
+                    op: crate::config::OpConfig {
+                        vault: Some("MyVault".to_string()),
+                        ..Default::default()
+                    },
+                    ..Defaults::default()
+                },
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = super::super::ResolveContext {
+                dir: Path::new("/tmp"),
+                config: &config,
+                project: None,
+                repository: Some("git@github.com:example/test-repo.git".to_string()),
+            };
+            let result = OpBackend.resolve("MY_KEY", None, &ctx);
+            assert_eq!(result.unwrap(), "resolved-value");
+        });
+    }
+
+    // Kills mutant 238→false: match guard replaced with `false` in no-vault branch.
+    // A "more than 1 item" error with context set must trigger disambiguation.
+    #[test]
+    fn backend_resolve_no_vault_disambiguates_on_multiple_items() {
+        let script = "#!/bin/sh\n\
+            if [ \"$2\" = \"get\" ] && [ \"$3\" = \"MY_KEY\" ]; then\n\
+              echo 'more than 1 item found' >&2\n\
+              exit 1\n\
+            fi\n\
+            if [ \"$2\" = \"list\" ]; then\n\
+              echo '[{\"id\":\"abc\",\"title\":\"MY_KEY\"}]'\n\
+              exit 0\n\
+            fi\n\
+            echo 'resolved-value'\n";
+        with_mock_op(script, || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = make_op_resolve_context(&config, Path::new("/tmp"));
+            let result = OpBackend.resolve("MY_KEY", None, &ctx);
+            assert_eq!(result.unwrap(), "resolved-value");
+        });
+    }
+
+    // Kills mutant 238→true: match guard replaced with `true` in no-vault branch.
+    // A non-"more than 1 item" error must be returned directly, not trigger disambiguation.
+    #[test]
+    fn backend_resolve_no_vault_non_multiple_item_error_propagated() {
+        let script = "#!/bin/sh\n\
+            if [ \"$2\" = \"get\" ] && [ \"$3\" = \"MY_KEY\" ]; then\n\
+              echo 'some other error' >&2\n\
+              exit 1\n\
+            fi\n\
+            if [ \"$2\" = \"list\" ]; then\n\
+              echo '[{\"id\":\"abc\",\"title\":\"MY_KEY\"}]'\n\
+              exit 0\n\
+            fi\n\
+            echo 'found-via-disambiguation'\n";
+        with_mock_op(script, || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = make_op_resolve_context(&config, Path::new("/tmp"));
+            let result = OpBackend.resolve("MY_KEY", None, &ctx);
+            let err = result.unwrap_err();
+            assert!(
+                format!("{err}").to_lowercase().contains("some other error"),
+                "unexpected error: {err}"
+            );
+        });
+    }
+
+    // Kills mutant 239: `||` replaced with `&&` in no-vault branch.
+    // Disambiguation must trigger when only repository is set (project is None).
+    #[test]
+    fn backend_resolve_no_vault_disambiguates_when_only_repository_set() {
+        let script = "#!/bin/sh\n\
+            if [ \"$2\" = \"get\" ] && [ \"$3\" = \"MY_KEY\" ]; then\n\
+              echo 'more than 1 item found' >&2\n\
+              exit 1\n\
+            fi\n\
+            if [ \"$2\" = \"list\" ]; then\n\
+              echo '[{\"id\":\"abc\",\"title\":\"MY_KEY\"}]'\n\
+              exit 0\n\
+            fi\n\
+            echo 'resolved-value'\n";
+        with_mock_op(script, || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = super::super::ResolveContext {
+                dir: Path::new("/tmp"),
+                config: &config,
+                project: None,
+                repository: Some("git@github.com:example/test-repo.git".to_string()),
+            };
+            let result = OpBackend.resolve("MY_KEY", None, &ctx);
+            assert_eq!(result.unwrap(), "resolved-value");
+        });
+    }
+
+    // Kills mutant 260: entire `store` body replaced with `Ok(())`.
+    // store must propagate op failures rather than silently returning Ok.
+    #[test]
+    fn backend_store_fails_when_op_fails() {
+        with_mock_op("#!/bin/sh\necho 'op error' >&2\nexit 1\n", || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = StoreContext {
+                dir: Path::new("/tmp"),
+                config: &config,
+                project: None,
+                repository: None,
+            };
+            let result = OpBackend.store("MY_KEY", "my-value", &ctx);
+            assert!(result.is_err(), "expected Err when op fails, got Ok");
+        });
+    }
+
+    // Kills mutant 406: entire `with_mock_op` body replaced with `()`.
+    // The closure must actually be called, not silently dropped.
+    #[test]
+    fn with_mock_op_invokes_closure() {
+        let invoked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let invoked_clone = invoked.clone();
+        with_mock_op("#!/bin/sh\necho 'test'\n", move || {
+            invoked_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        assert!(
+            invoked.load(std::sync::atomic::Ordering::SeqCst),
+            "with_mock_op did not invoke the closure"
+        );
+    }
 }
