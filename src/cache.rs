@@ -503,4 +503,83 @@ mod tests {
 
         assert!(cached.is_none());
     }
+
+    #[test]
+    fn secret_value_cache_expired_entry_is_removed_and_persisted() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let index_path = temp_dir.path().join("pw-env").join(SECRET_CACHE_FILE_NAME);
+        set_test_secret_cache_index_path(Some(index_path));
+        set_test_keyring_available(true);
+
+        let key = sample_key();
+        let fingerprint = key.fingerprint();
+
+        let mut index = SecretCacheIndex::default();
+        index.entries.insert(
+            fingerprint.clone(),
+            SecretCacheIndexEntry {
+                cached_at_unix_secs: 0,
+            },
+        );
+        index.save().unwrap();
+
+        TEST_KEYRING_VALUES.with(|values| {
+            values
+                .borrow_mut()
+                .insert(fingerprint, "stale-secret".to_string());
+        });
+
+        let mut cache = SecretValueCache::load(&CacheConfig::default());
+        let cached = cache.get(&key);
+        let saved_index = SecretCacheIndex::load().unwrap();
+
+        assert!(cached.is_none());
+        assert!(saved_index.entries.is_empty());
+
+        reset_test_keyring();
+        set_test_secret_cache_index_path(None);
+    }
+
+    #[test]
+    fn secret_cache_index_path_returns_configured_test_path() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let index_path = temp_dir.path().join("pw-env").join(SECRET_CACHE_FILE_NAME);
+        set_test_secret_cache_index_path(Some(index_path.clone()));
+
+        let resolved = secret_cache_index_path();
+
+        assert_eq!(resolved, Some(index_path));
+
+        set_test_secret_cache_index_path(None);
+    }
+
+    #[test]
+    fn clear_secret_cache_counts_keyring_failures_per_entry() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let index_path = temp_dir.path().join("pw-env").join(SECRET_CACHE_FILE_NAME);
+        set_test_secret_cache_index_path(Some(index_path));
+        set_test_keyring_available(true);
+
+        let mut cache = SecretValueCache::load(&CacheConfig::default());
+        let first = sample_key();
+        let mut second = sample_key();
+        second.entry_key = "SECOND_KEY".to_string();
+
+        cache.set(&first, "value-1");
+        cache.set(&second, "value-2");
+
+        set_test_keyring_available(false);
+        let result = clear_secret_cache().unwrap();
+
+        assert!(result.keyring_unavailable);
+        assert_eq!(result.keyring_delete_failures, 2);
+
+        reset_test_keyring();
+        set_test_secret_cache_index_path(None);
+    }
+
+    #[test]
+    fn now_unix_secs_returns_current_epoch_seconds() {
+        assert!(now_unix_secs() > 1_000_000_000);
+    }
 }

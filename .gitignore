@@ -6,4 +6,5 @@
 TODO.md
 /mutants.out*
 
-mutants.out/
+/mutants.out
+/mutants-results
