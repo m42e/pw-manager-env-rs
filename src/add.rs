@@ -80,19 +80,46 @@ fn validate_key(key: &str) -> Result<()> {
 }
 
 fn read_secret_value(key: &str, provided_value: Option<String>) -> Result<String> {
+    let value = read_secret_value_with(
+        key,
+        provided_value,
+        std::io::stdin().is_terminal(),
+        |key| {
+            Password::new()
+                .with_prompt(format!("Value for {key}"))
+                .with_confirmation("Confirm value", "Values do not match")
+                .interact()
+                .context("Failed to read secret value")
+        },
+        || read_secret_value_from_stdin(std::io::stdin()),
+    )?;
+
+    if value.is_empty() {
+        bail!("Secret value cannot be empty")
+    }
+
+    Ok(value)
+}
+
+fn read_secret_value_with<Prompt, ReadStdin>(
+    key: &str,
+    provided_value: Option<String>,
+    stdin_is_terminal: bool,
+    prompt_secret_value: Prompt,
+    read_secret_value_from_stdin: ReadStdin,
+) -> Result<String>
+where
+    Prompt: FnOnce(&str) -> Result<String>,
+    ReadStdin: FnOnce() -> Result<String>,
+{
     let value = match provided_value {
         Some(value) => value,
-        None if std::io::stdin().is_terminal() => Password::new()
-            .with_prompt(format!("Value for {key}"))
-            .with_confirmation("Confirm value", "Values do not match")
-            .interact()
-            .context("Failed to read secret value")?,
         None => {
-            let mut buffer = String::new();
-            std::io::stdin()
-                .read_to_string(&mut buffer)
-                .context("Failed to read secret value from stdin")?;
-            trim_single_trailing_newline(buffer)
+            if stdin_is_terminal {
+                prompt_secret_value(key)?
+            } else {
+                read_secret_value_from_stdin()?
+            }
         }
     };
 
@@ -101,6 +128,13 @@ fn read_secret_value(key: &str, provided_value: Option<String>) -> Result<String
     }
 
     Ok(value)
+}
+fn read_secret_value_from_stdin(mut reader: impl Read) -> Result<String> {
+    let mut buffer = String::new();
+    reader
+        .read_to_string(&mut buffer)
+        .context("Failed to read secret value from stdin")?;
+    Ok(trim_single_trailing_newline(buffer))
 }
 
 fn trim_single_trailing_newline(mut value: String) -> String {
@@ -255,6 +289,127 @@ mod tests {
 
         let contents = std::fs::read_to_string(env_path).unwrap();
         assert_eq!(contents, "EXISTING_KEY=\nAPI_KEY=\n");
+    }
+
+    #[test]
+    fn apply_env_entry_update_appends_to_empty_file_without_leading_newline() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        std::fs::write(&env_path, "").unwrap();
+
+        apply_env_entry_update(EnvEntryUpdate::Append(env_path.clone()), "API_KEY").unwrap();
+
+        let contents = std::fs::read_to_string(env_path).unwrap();
+        assert_eq!(contents, "API_KEY=\n");
+    }
+
+    #[test]
+    fn read_secret_value_uses_prompt_when_stdin_is_terminal() {
+        let value = read_secret_value_with(
+            "API_KEY",
+            None,
+            true,
+            |key| Ok(format!("prompted-{key}")),
+            || bail!("stdin reader should not be used"),
+        )
+        .unwrap();
+
+        assert_eq!(value, "prompted-API_KEY");
+    }
+
+    #[test]
+    fn read_secret_value_reads_stdin_when_not_terminal() {
+        let value = read_secret_value_with(
+            "API_KEY",
+            None,
+            false,
+            |_| bail!("prompt should not be used"),
+            || read_secret_value_from_stdin(std::io::Cursor::new("secret\n")),
+        )
+        .unwrap();
+
+        assert_eq!(value, "secret");
+    }
+
+    #[test]
+    fn read_secret_value_rejects_empty_value_from_stdin() {
+        let error = read_secret_value_with(
+            "API_KEY",
+            None,
+            false,
+            |_| bail!("prompt should not be used"),
+            || read_secret_value_from_stdin(std::io::Cursor::new("\n")),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "Secret value cannot be empty");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn add_entry_rejects_invalid_key_before_backend_interaction() {
+        let _guard = crate::backend::MOCK_PATH_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_dir = TempDir::new().unwrap();
+        let bin_dir = TempDir::new().unwrap();
+        let gpg_path = bin_dir.path().join("gpg");
+        let gpg_output_path = temp_dir.path().join("captured-gpg-output.txt");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--decrypt\" ]; then\n  cat '{}'
+\n  exit 0\nfi\nout=''\nprev=''\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"--output\" ]; then\n    out=\"$arg\"\n    break\n  fi\n  prev=\"$arg\"\ndone\ncat > \"$out\"\ncp \"$out\" '{}'\nexit 0\n",
+            gpg_output_path.display(),
+            gpg_output_path.display()
+        );
+
+        std::fs::write(&gpg_path, script).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&gpg_path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&gpg_path, permissions).unwrap();
+        }
+
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let new_path = std::env::join_paths(
+            std::iter::once(bin_dir.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
+        )
+        .unwrap();
+        unsafe { std::env::set_var("PATH", &new_path) };
+
+        let config = Config {
+            defaults: Defaults {
+                backend: "gpg".to_string(),
+                gpg: GpgConfig {
+                    file_pattern: ".env.gpg".to_string(),
+                    recipient: Some("test@example.com".to_string()),
+                },
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        let result = add_entry(
+            temp_dir.path(),
+            &config,
+            "INVALID-KEY",
+            Some("super-secret".to_string()),
+            None,
+        );
+
+        unsafe { std::env::set_var("PATH", &old_path) };
+
+        let error = result.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Invalid environment variable name 'INVALID-KEY'"),
+            "unexpected error: {error:#}"
+        );
+        assert!(!temp_dir.path().join(".env").exists());
+        assert!(!temp_dir.path().join(".env.gpg").exists());
     }
 
     #[test]
