@@ -397,11 +397,10 @@ fn looks_like_secret_name(key: &str) -> bool {
         .filter(|segment| !segment.is_empty())
         .collect();
 
+    // "auth_token", "client_secret", and "refresh_token" are already matched by the
+    // "token" and "secret" direct patterns above, so those segment pairs are omitted.
     contains_segment_pair(&segments, "api", "key")
         || contains_segment_pair(&segments, "auth", "key")
-        || contains_segment_pair(&segments, "auth", "token")
-        || contains_segment_pair(&segments, "client", "secret")
-        || contains_segment_pair(&segments, "refresh", "token")
         || contains_segment_pair(&segments, "private", "key")
         || contains_segment_pair(&segments, "access", "key")
 }
@@ -442,7 +441,10 @@ fn has_common_secret_prefix(value: &str) -> bool {
 
 fn looks_like_high_entropy_secret(value: &str) -> bool {
     let trimmed = value.trim();
-    if trimmed.len() < 16 || trimmed.chars().any(char::is_whitespace) || trimmed.contains("://") {
+    // Reject strings that are too short to satisfy either entropy condition (both
+    // require len >= 20).  Whitespace and URL characters are caught below by the
+    // alphanumeric-only check, so no redundant early returns are needed.
+    if trimmed.len() < 20 {
         return false;
     }
 
@@ -767,6 +769,24 @@ mod tests {
     }
 
     #[test]
+    fn looks_like_secret_name_detects_api_key_segment_pair_with_double_dash() {
+        // "X--API--KEY" normalises to "x__api__key": "api_key" (single underscore) is
+        // not a substring, so only the segment-pair check can return true.
+        assert!(looks_like_secret_name("X--API--KEY"));
+    }
+
+    #[test]
+    fn looks_like_secret_name_detects_private_key_segment_pair_with_double_dash() {
+        // Same reasoning: "x__private__key" does not contain the "private_key" substring.
+        assert!(looks_like_secret_name("X--PRIVATE--KEY"));
+    }
+
+    #[test]
+    fn looks_like_secret_name_detects_access_key_segment_pair_with_double_dash() {
+        assert!(looks_like_secret_name("X--ACCESS--KEY"));
+    }
+
+    #[test]
     fn looks_like_secret_name_does_not_match_non_secret_key_names() {
         assert!(!looks_like_secret_name("AUTH_URL"));
         assert!(!looks_like_secret_name("LOG_LEVEL"));
@@ -835,6 +855,13 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn looks_like_high_entropy_secret_exactly_minimum_length_qualifies() {
+        // 20 unique ASCII letters → entropy = log2(20) ≈ 4.32 ≥ 3.8, len == 20.
+        // With the `< 20` guard mutated to `== 20` or `<= 20` this would be rejected early.
+        assert!(looks_like_high_entropy_secret("abcdefghijklmnopqrst"));
+    }
+
     fn write_test_env(contents: &str) -> PathBuf {
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -847,6 +874,16 @@ mod tests {
 
         std::fs::write(&path, contents).expect("temp env file should be writable");
         path
+    }
+
+    #[test]
+    fn find_returns_some_for_plain_env_file() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        std::fs::write(&env_path, "KEY=value\n").unwrap();
+
+        let found = EnvFile::find(temp_dir.path());
+        assert_eq!(found, Some(env_path));
     }
 
     #[cfg(unix)]

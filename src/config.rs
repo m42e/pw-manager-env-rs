@@ -2010,6 +2010,31 @@ backend = "op"
     }
 
     #[test]
+    fn approve_hash_evicts_excess_entries_keeping_exactly_max() {
+        // Insert MAX_HASHES_PER_PROJECT + 2 (12) hashes.  After each insertion the
+        // function must trim to exactly 10.  With the `-` → `+` mutation, take(22)
+        // would drain the set to 0.  With the `-` → `/` mutation, take(12/10 = 1)
+        // would leave 11 entries.
+        let test_dir = unique_test_dir("asf-evict-excess");
+        fs::create_dir_all(&test_dir).unwrap();
+        let project_dir = test_dir.join("project");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let mut approvals = ApprovedSecretFetches::default();
+        for i in 0..12usize {
+            approvals.approve_hash(&project_dir, format!("hash-{i:02}"));
+        }
+
+        let count = approvals.approved_hashes(&project_dir).len();
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert_eq!(
+            count, 10,
+            "approve_hash should retain exactly 10 hashes, got {count}"
+        );
+    }
+
+    #[test]
     fn test_reviewed_migrations_remember_and_fingerprints() {
         let test_dir = unique_test_dir("rm-remember");
         fs::create_dir_all(&test_dir).unwrap();
@@ -2825,6 +2850,34 @@ backend = "op"
         assert!(
             fps.contains(&unique_fp),
             "fingerprint should be retrievable after remember()"
+        );
+    }
+
+    #[test]
+    fn forget_reviewed_migration_entries_removes_fingerprint() {
+        let test_dir = unique_test_dir("rm-forget-removes");
+        fs::create_dir_all(&test_dir).unwrap();
+        set_test_reviewed_migrations_store(&test_dir);
+        let env_path = test_dir.join(".env");
+        fs::write(&env_path, "KEY=value\n").unwrap();
+
+        let fp = "test-forget-fingerprint";
+        Config::remember_reviewed_migration_entries(&env_path, [fp.to_string()]).unwrap();
+
+        let before = Config::reviewed_migration_entry_fingerprints(&env_path).unwrap();
+        assert!(
+            before.contains(fp),
+            "fingerprint should be present after remember()"
+        );
+
+        Config::forget_reviewed_migration_entries(&env_path, [fp.to_string()]).unwrap();
+
+        let after = Config::reviewed_migration_entry_fingerprints(&env_path).unwrap();
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(
+            !after.contains(fp),
+            "fingerprint should be absent after forget()"
         );
     }
 
