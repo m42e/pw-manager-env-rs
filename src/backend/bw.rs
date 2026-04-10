@@ -1358,6 +1358,7 @@ impl Backend for BwBackend {
 mod tests {
     use super::*;
     use crate::config::{BwConfig, Config, Defaults, LogConfig, UpdateConfig};
+    use std::cell::Cell;
     use std::path::Path;
 
     #[test]
@@ -1551,6 +1552,165 @@ mod tests {
         BwBackend::set_test_sync_throttle_override(None);
     }
 
+    #[test]
+    fn with_mock_bw_executes_callback() {
+        let called = Cell::new(false);
+        with_mock_bw("#!/bin/sh\nexit 0\n", || {
+            called.set(true);
+        });
+        assert!(called.get(), "expected callback to be executed");
+    }
+
+    #[test]
+    fn configure_sync_throttle_updates_effective_value() {
+        BwBackend::set_test_sync_throttle_override(None);
+        assert_eq!(
+            BwBackend::effective_sync_throttle_secs(),
+            DEFAULT_SYNC_THROTTLE_SECS
+        );
+
+        BwBackend::configure_sync_throttle(7200);
+        assert_eq!(BwBackend::effective_sync_throttle_secs(), 7200);
+
+        BwBackend::configure_sync_throttle(30);
+        assert_eq!(
+            BwBackend::effective_sync_throttle_secs(),
+            MIN_SYNC_THROTTLE_SECS
+        );
+
+        BwBackend::set_test_sync_throttle_override(None);
+    }
+
+    #[test]
+    fn should_retry_after_sync_matches_expected_patterns() {
+        for message in [
+            "No Bitwarden items found with name 'KEY'",
+            "Field 'token' not found in Bitwarden item",
+            "Failed to fetch Bitwarden item 'my-item'",
+            "Failed to list Bitwarden items: boom",
+            "Object not found",
+        ] {
+            let error = anyhow::anyhow!(message);
+            assert!(
+                BwBackend::should_retry_after_sync(&error),
+                "expected retryable error: {message}"
+            );
+        }
+
+        let error = anyhow::anyhow!("permission denied");
+        assert!(!BwBackend::should_retry_after_sync(&error));
+    }
+
+    #[test]
+    fn current_unix_secs_is_close_to_system_time() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let observed = BwBackend::current_unix_secs().expect("expected unix timestamp");
+        assert!(observed <= now.saturating_add(2));
+        assert!(observed.saturating_add(2) >= now);
+    }
+
+    #[test]
+    fn test_paths_use_test_overrides() {
+        let state_dir = tempfile::TempDir::new().unwrap();
+        let folder_path = state_dir.path().join("folder-cache.json");
+        let sync_path = state_dir.path().join("sync-state.json");
+
+        BwBackend::set_test_folder_cache_path(Some(folder_path.clone()));
+        BwBackend::set_test_sync_state_path(Some(sync_path.clone()));
+
+        assert_eq!(
+            BwBackend::folder_cache_path().as_deref(),
+            Some(folder_path.as_path())
+        );
+        assert_eq!(
+            BwBackend::sync_state_path().as_deref(),
+            Some(sync_path.as_path())
+        );
+
+        BwBackend::set_test_folder_cache_path(None);
+        BwBackend::set_test_sync_state_path(None);
+    }
+
+    #[test]
+    fn sync_state_store_save_persists_contents() {
+        let state_dir = tempfile::TempDir::new().unwrap();
+        let sync_path = state_dir.path().join("pw-env").join(SYNC_STATE_FILE_NAME);
+        BwBackend::set_test_sync_state_path(Some(sync_path.clone()));
+
+        SyncStateStore {
+            last_sync_unix_secs: Some(12345),
+        }
+        .save()
+        .unwrap();
+
+        let persisted: SyncStateStore =
+            serde_json::from_str(&std::fs::read_to_string(&sync_path).unwrap()).unwrap();
+        assert_eq!(persisted.last_sync_unix_secs, Some(12345));
+
+        BwBackend::set_test_sync_state_path(None);
+    }
+
+    #[test]
+    fn is_stale_session_error_detects_expected_messages() {
+        assert!(BwBackend::is_stale_session_error("Invalid master password"));
+        assert!(BwBackend::is_stale_session_error("Session key is invalid"));
+        assert!(BwBackend::is_stale_session_error("Not logged in"));
+        assert!(!BwBackend::is_stale_session_error("network timeout"));
+    }
+
+    #[test]
+    fn invalidate_session_clears_cached_value() {
+        *super::SESSION.lock().unwrap() = Some("session-token".to_string());
+        BwBackend::invalidate_session();
+        assert!(super::SESSION.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn ensure_session_uses_bw_session_from_environment() {
+        let state_dir = tempfile::TempDir::new().unwrap();
+        let call_log = state_dir.path().join("bw-calls.log");
+        let sync_state_path = state_dir.path().join("pw-env").join(SYNC_STATE_FILE_NAME);
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nexit 0\n",
+            call_log.display()
+        );
+
+        with_mock_bw(&script, || {
+            *super::SESSION.lock().unwrap() = None;
+            BwBackend::set_test_sync_state_path(Some(sync_state_path.clone()));
+            // SAFETY: guarded by MOCK_PATH_MUTEX in with_mock_bw
+            unsafe {
+                std::env::set_var("BW_SESSION", "session-from-env");
+            }
+
+            let session = BwBackend::ensure_session().unwrap();
+            assert_eq!(session, "session-from-env");
+
+            // A sync should still be triggered when using an env-provided session.
+            let log = std::fs::read_to_string(&call_log).unwrap();
+            assert!(log.lines().any(|line| line == "sync"));
+        });
+    }
+
+    #[test]
+    fn run_bw_does_not_inject_empty_bw_session_env() {
+        let script = "#!/bin/sh\nif [ \"$1\" = \"status\" ]; then\n  echo '{\"status\":\"unlocked\"}'\n  exit 0\nfi\nif printenv BW_SESSION >/dev/null 2>&1; then\n  echo 'BW_SESSION should not be present for unlocked status' >&2\n  exit 1\nfi\necho 'ok'\n";
+
+        with_mock_bw(script, || {
+            *super::SESSION.lock().unwrap() = None;
+            // SAFETY: guarded by MOCK_PATH_MUTEX in with_mock_bw
+            unsafe {
+                std::env::remove_var("BW_SESSION");
+            }
+
+            let output = BwBackend::run_bw(&["list", "items"]).unwrap();
+            assert_eq!(output, "ok");
+        });
+    }
+
     fn make_bw_item_json(password: &str) -> String {
         format!(r#"{{"type":1,"name":"test-item","login":{{"password":"{password}"}}}}"#)
     }
@@ -1580,6 +1740,195 @@ mod tests {
         with_mock_bw("#!/bin/sh\necho 'error output' >&2\nexit 1\n", || {
             let result = BwBackend::run_bw(&["any", "arg"]);
             assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn run_bw_retries_once_on_stale_session_and_returns_retry_output() {
+        let state_dir = tempfile::TempDir::new().unwrap();
+        let marker = state_dir.path().join("retry-marker");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"status\" ]; then\n  echo '{{\"status\":\"unlocked\"}}'\n  exit 0\nfi\nif [ ! -f '{}' ]; then\n  touch '{}'\n  echo 'Session key is invalid' >&2\n  exit 1\nfi\necho 'retry-ok'\n",
+            marker.display(),
+            marker.display()
+        );
+
+        with_mock_bw(&script, || {
+            let result = BwBackend::run_bw(&["list", "items"]);
+            assert_eq!(result.unwrap(), "retry-ok");
+        });
+    }
+
+    #[test]
+    fn sync_vault_runs_sync_when_state_is_stale() {
+        let state_dir = tempfile::TempDir::new().unwrap();
+        let sync_state_path = state_dir.path().join("pw-env").join(SYNC_STATE_FILE_NAME);
+        std::fs::create_dir_all(sync_state_path.parent().unwrap()).unwrap();
+        let now = BwBackend::current_unix_secs().unwrap();
+        std::fs::write(
+            &sync_state_path,
+            format!("{{\"last_sync_unix_secs\":{}}}", now.saturating_sub(7200)),
+        )
+        .unwrap();
+
+        let call_log = state_dir.path().join("bw-sync-calls.log");
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nexit 0\n",
+            call_log.display()
+        );
+
+        with_mock_bw(&script, || {
+            BwBackend::set_test_sync_state_path(Some(sync_state_path.clone()));
+            BwBackend::set_test_sync_throttle_override(Some(MIN_SYNC_THROTTLE_SECS));
+            BwBackend::sync_vault();
+
+            let log = std::fs::read_to_string(&call_log).unwrap();
+            assert!(
+                log.lines().any(|line| line == "sync"),
+                "expected a sync call when state is stale"
+            );
+        });
+    }
+
+    #[test]
+    fn sync_vault_runs_sync_when_age_equals_throttle() {
+        let state_dir = tempfile::TempDir::new().unwrap();
+        let sync_state_path = state_dir.path().join("pw-env").join(SYNC_STATE_FILE_NAME);
+        std::fs::create_dir_all(sync_state_path.parent().unwrap()).unwrap();
+        let now = BwBackend::current_unix_secs().unwrap();
+        std::fs::write(
+            &sync_state_path,
+            format!(
+                "{{\"last_sync_unix_secs\":{}}}",
+                now.saturating_sub(MIN_SYNC_THROTTLE_SECS)
+            ),
+        )
+        .unwrap();
+
+        let call_log = state_dir.path().join("bw-sync-calls.log");
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nexit 0\n",
+            call_log.display()
+        );
+
+        with_mock_bw(&script, || {
+            BwBackend::set_test_sync_state_path(Some(sync_state_path.clone()));
+            BwBackend::set_test_sync_throttle_override(Some(MIN_SYNC_THROTTLE_SECS));
+            BwBackend::sync_vault();
+
+            let log = std::fs::read_to_string(&call_log).unwrap();
+            assert!(
+                log.lines().any(|line| line == "sync"),
+                "expected a sync call when age equals throttle"
+            );
+        });
+    }
+
+    #[test]
+    fn resolve_reference_folder_id_prefers_reference_folder() {
+        let script = "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"folders\" ] && [ \"$4\" = \"ref-folder\" ]; then\n  echo '[{\"name\":\"ref-folder\",\"id\":\"folder-ref\"}]'\n  exit 0\nfi\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"folders\" ] && [ \"$4\" = \"cfg-folder\" ]; then\n  echo '[{\"name\":\"cfg-folder\",\"id\":\"folder-cfg\"}]'\n  exit 0\nfi\nexit 1\n";
+
+        with_mock_bw(script, || {
+            let result =
+                BwBackend::resolve_reference_folder_id(Some("ref-folder"), Some("cfg-folder"))
+                    .unwrap();
+            assert_eq!(result.as_deref(), Some("folder-ref"));
+
+            let configured_only =
+                BwBackend::resolve_reference_folder_id(None, Some("cfg-folder")).unwrap();
+            assert_eq!(configured_only.as_deref(), Some("folder-cfg"));
+
+            let none = BwBackend::resolve_reference_folder_id(None, None).unwrap();
+            assert!(none.is_none());
+        });
+    }
+
+    #[test]
+    fn select_item_from_list_errors_when_no_exact_name() {
+        let items = vec![serde_json::json!({"name":"OTHER_KEY"})];
+        let result = BwBackend::select_item_from_list("MY_KEY", &items, None, None, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn select_item_from_list_returns_single_repository_match() {
+        let items = vec![
+            serde_json::json!({
+                "name": "API_KEY",
+                "fields": [
+                    {"name":"repository","value":"git@github.com:example/test-repo.git","type":0}
+                ]
+            }),
+            serde_json::json!({
+                "name": "API_KEY",
+                "fields": [
+                    {"name":"repository","value":"git@github.com:example/other.git","type":0}
+                ]
+            }),
+        ];
+
+        let selected = BwBackend::select_item_from_list(
+            "API_KEY",
+            &items,
+            Some("git@github.com:example/test-repo.git"),
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            selected.get("fields").unwrap()[0].get("value").unwrap(),
+            "git@github.com:example/test-repo.git"
+        );
+    }
+
+    #[test]
+    fn resolve_does_not_force_sync_for_non_retryable_errors() {
+        let state_dir = tempfile::TempDir::new().unwrap();
+        let call_log = state_dir.path().join("bw-calls.log");
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then\n  echo 'permission denied' >&2\n  exit 1\nfi\nif [ \"$1\" = \"sync\" ]; then\n  echo 'unexpected sync' >&2\n  exit 1\nfi\nexit 1\n",
+            call_log.display()
+        );
+
+        with_mock_bw(&script, || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = make_resolve_context(&config, std::path::Path::new("/tmp"));
+            let backend = BwBackend;
+            let result = backend.resolve("MY_KEY", None, &ctx);
+            assert!(result.is_err());
+
+            let log = std::fs::read_to_string(&call_log).unwrap_or_default();
+            assert!(
+                !log.lines().any(|line| line == "sync"),
+                "did not expect a forced sync for non-retryable errors"
+            );
+        });
+    }
+
+    #[test]
+    fn backend_store_returns_err_when_bw_create_fails() {
+        with_mock_bw("#!/bin/sh\nexit 1\n", || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = StoreContext {
+                dir: Path::new("/tmp"),
+                config: &config,
+                project: None,
+                repository: None,
+            };
+            let result = BwBackend.store("NEW_KEY", "new-value", &ctx);
+            assert!(result.is_err(), "expected store failure to be propagated");
         });
     }
 
