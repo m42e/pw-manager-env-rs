@@ -756,6 +756,14 @@ mod tests {
     }
 
     #[test]
+    fn comment_has_no_migrate_marker_requires_both_prefix_and_suffix_match() {
+        // Prefix matches but suffix does not.
+        assert!(!comment_has_no_migrate_marker("# pw-env:skip"));
+        // Suffix matches but prefix does not.
+        assert!(!comment_has_no_migrate_marker("# note:ignore"));
+    }
+
+    #[test]
     fn strip_quotes_does_not_strip_mismatched_quotes() {
         assert_eq!(strip_quotes("\"hello'"), "\"hello'");
         assert_eq!(strip_quotes("'hello\""), "'hello\"");

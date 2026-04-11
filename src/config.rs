@@ -1438,6 +1438,56 @@ vault = "Work"
     }
 
     #[test]
+    fn test_effective_warn_missing_uses_project_override_and_default() {
+        let config = Config {
+            defaults: Defaults {
+                warn_missing: false,
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![
+                ProjectOverride {
+                    path: "/home/user/work/true".to_string(),
+                    warn_missing: Some(true),
+                    ..ProjectOverride::default()
+                },
+                ProjectOverride {
+                    path: "/home/user/work/false".to_string(),
+                    warn_missing: Some(false),
+                    ..ProjectOverride::default()
+                },
+            ],
+        };
+
+        assert!(config.effective_warn_missing(Path::new("/home/user/work/true/app")));
+        assert!(!config.effective_warn_missing(Path::new("/home/user/work/false/app")));
+        assert!(!config.effective_warn_missing(Path::new("/home/user/other")));
+    }
+
+    #[test]
+    fn test_approve_hash_keeps_max_hashes_and_evicts_oldest_lexicographic() {
+        let project_path = Path::new("/tmp/project");
+        let mut approvals = ApprovedSecretFetches::default();
+
+        for index in 0..10 {
+            approvals.approve_hash(project_path, format!("{index:02}"));
+        }
+
+        let ten_hashes = approvals.approved_hashes(project_path);
+        assert_eq!(ten_hashes.len(), 10);
+        assert!(ten_hashes.contains("00"));
+        assert!(ten_hashes.contains("09"));
+
+        approvals.approve_hash(project_path, "10".to_string());
+        let after_eleven = approvals.approved_hashes(project_path);
+        assert_eq!(after_eleven.len(), 10);
+        assert!(!after_eleven.contains("00"));
+        assert!(after_eleven.contains("01"));
+        assert!(after_eleven.contains("10"));
+    }
+
+    #[test]
     fn test_approval_store_round_trip_and_revoke() {
         let test_dir = unique_test_dir("approval-store");
         let override_path = test_dir.join(PROJECT_OVERRIDE_FILE_NAME);

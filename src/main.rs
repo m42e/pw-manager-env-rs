@@ -245,7 +245,7 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
                     .collect::<Vec<_>>();
                 let resolved = resolve::resolve_env_file(&env_file, &config, &dir)?;
 
-                if warn_missing || config.effective_warn_missing(&dir) {
+                if should_warn_missing(warn_missing, config.effective_warn_missing(&dir)) {
                     emit_missing_entries_warning(&managed_keys, &resolved);
                 }
 
@@ -307,7 +307,7 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
                 .collect();
             let resolved = resolve::resolve_env_file(&env_file, &config, &dir)?;
 
-            if warn_missing || config.effective_warn_missing(&dir) {
+            if should_warn_missing(warn_missing, config.effective_warn_missing(&dir)) {
                 emit_missing_entries_warning(&resolvable_keys, &resolved);
             }
 
@@ -438,11 +438,7 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
                 eprintln!("  {} = {}", key, display_value);
             }
 
-            let missing: Vec<&str> = resolvable_keys
-                .iter()
-                .filter(|key| !resolved.contains_key(*key))
-                .map(String::as_str)
-                .collect();
+            let missing = missing_resolvable_keys(&resolvable_keys, &resolved);
             if !missing.is_empty() {
                 eprintln!();
                 eprintln!(
@@ -556,15 +552,26 @@ fn summarize_entry_keys(entries: &[&env_file::EnvEntry]) -> String {
     }
 }
 
+fn should_warn_missing(flag: bool, config_value: bool) -> bool {
+    flag || config_value
+}
+
+fn missing_resolvable_keys<'a>(
+    resolvable_keys: &'a [String],
+    resolved: &std::collections::BTreeMap<String, String>,
+) -> Vec<&'a str> {
+    resolvable_keys
+        .iter()
+        .filter(|key| !resolved.contains_key(*key))
+        .map(String::as_str)
+        .collect()
+}
+
 fn emit_missing_entries_warning(
     resolvable_keys: &[String],
     resolved: &std::collections::BTreeMap<String, String>,
 ) {
-    let missing: Vec<&str> = resolvable_keys
-        .iter()
-        .filter(|key| !resolved.contains_key(*key))
-        .map(String::as_str)
-        .collect();
+    let missing = missing_resolvable_keys(resolvable_keys, resolved);
     if !missing.is_empty() {
         eprintln!(
             "pw-env: warning: could not resolve the following entries: {}",
@@ -1263,7 +1270,41 @@ fn setup_logging(config: &config::Config) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use tempfile::TempDir;
+
+    #[test]
+    fn should_warn_missing_truth_table() {
+        assert!(!should_warn_missing(false, false));
+        assert!(should_warn_missing(true, false));
+        assert!(should_warn_missing(false, true));
+        assert!(should_warn_missing(true, true));
+    }
+
+    #[test]
+    fn missing_resolvable_keys_returns_only_unresolved_keys() {
+        let resolvable = vec![
+            "API_KEY".to_string(),
+            "DB_URL".to_string(),
+            "TOKEN".to_string(),
+        ];
+        let resolved = BTreeMap::from([
+            ("API_KEY".to_string(), "value".to_string()),
+            ("TOKEN".to_string(), "value".to_string()),
+        ]);
+
+        let missing = missing_resolvable_keys(&resolvable, &resolved);
+        assert_eq!(missing, vec!["DB_URL"]);
+    }
+
+    #[test]
+    fn missing_resolvable_keys_returns_empty_when_all_resolved() {
+        let resolvable = vec!["API_KEY".to_string()];
+        let resolved = BTreeMap::from([("API_KEY".to_string(), "value".to_string())]);
+
+        let missing = missing_resolvable_keys(&resolvable, &resolved);
+        assert!(missing.is_empty());
+    }
 
     #[test]
     fn summarize_entry_keys_empty() {
