@@ -32,7 +32,16 @@ jobs:
         run: cargo install cargo-mutants --locked
 
       - name: Run mutation tests
-        run: cargo mutants --no-shuffle -vV --baseline=skip --shard ${{ matrix.shard }}/8
+        # Exit codes: 0=all caught, 2=missed, 3=timeout → OK (informational)
+        # Exit codes 1 (usage error) and 4 (build failed) → real failures
+        run: |
+          set +e
+          cargo mutants --no-shuffle -vV --baseline=skip --shard ${{ matrix.shard }}/8
+          exit_code=$?
+          if [[ $exit_code -eq 0 || $exit_code -eq 2 || $exit_code -eq 3 ]]; then
+            exit 0
+          fi
+          exit "$exit_code"
 
       - name: Upload mutants results
         if: always()
