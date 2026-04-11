@@ -973,6 +973,10 @@ impl ApprovedSecretFetches {
         // Eviction order is lexicographic (BTreeSet), not chronological, but
         // the important invariant is that the set stays bounded and the
         // just-inserted hash is retained.
+        //
+        // Equivalent-mutant note: with one-at-a-time inserts the only
+        // reachable len above MAX is MAX+1, where `>` vs `>=` and `-` vs `/`
+        // produce the same eviction count (1).
         const MAX_HASHES_PER_PROJECT: usize = 10;
         if hashes.len() > MAX_HASHES_PER_PROJECT {
             let to_remove: Vec<String> = hashes
@@ -1143,6 +1147,11 @@ impl ReviewedMigrations {
         }
         Some(state_dir().join("pw-env").join("reviewed-migrations.json"))
     }
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_reviewed_migrations_path(path: Option<PathBuf>) {
+    TEST_REVIEWED_MIGRATIONS_PATH.with(|v| *v.borrow_mut() = path);
 }
 
 fn expand_path(path: &str) -> PathBuf {

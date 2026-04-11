@@ -974,4 +974,77 @@ mod tests {
             "with_mock_op did not invoke the closure"
         );
     }
+
+    #[test]
+    fn reference_url_with_vault_returns_op_url() {
+        let config = Config {
+            defaults: Defaults {
+                op: crate::config::OpConfig {
+                    vault: Some("Dev".to_string()),
+                    ..crate::config::OpConfig::default()
+                },
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        let ctx = super::super::StoreContext {
+            dir: Path::new("/tmp/project"),
+            config: &config,
+            project: None,
+            repository: None,
+        };
+
+        let url = OpBackend.reference_url("API_KEY", &ctx);
+        assert_eq!(url.as_deref(), Some("op://Dev/API_KEY/password"));
+    }
+
+    #[test]
+    fn reference_url_with_vault_and_item() {
+        let config = Config {
+            defaults: Defaults {
+                op: crate::config::OpConfig {
+                    vault: Some("Work".to_string()),
+                    item: Some("shared".to_string()),
+                    ..crate::config::OpConfig::default()
+                },
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        let ctx = super::super::StoreContext {
+            dir: Path::new("/tmp/project"),
+            config: &config,
+            project: None,
+            repository: None,
+        };
+
+        let url = OpBackend.reference_url("SECRET", &ctx);
+        assert_eq!(url.as_deref(), Some("op://Work/shared/SECRET"));
+    }
+
+    #[test]
+    fn reference_url_without_vault_returns_none() {
+        let config = Config {
+            defaults: Defaults::default(),
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        let ctx = super::super::StoreContext {
+            dir: Path::new("/tmp/project"),
+            config: &config,
+            project: None,
+            repository: None,
+        };
+
+        let url = OpBackend.reference_url("KEY", &ctx);
+        assert_eq!(url, None);
+    }
 }

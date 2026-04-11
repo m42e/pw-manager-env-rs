@@ -441,10 +441,7 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
             let missing = missing_resolvable_keys(&resolvable_keys, &resolved);
             if !missing.is_empty() {
                 eprintln!();
-                eprintln!(
-                    "Warning: could not resolve the following entries: {}",
-                    missing.join(", ")
-                );
+                emit_missing_entries_warning(&resolvable_keys, &resolved);
             }
 
             let display_values = resolved
@@ -570,7 +567,7 @@ fn missing_resolvable_keys<'a>(
 fn emit_missing_entries_warning(
     resolvable_keys: &[String],
     resolved: &std::collections::BTreeMap<String, String>,
-) {
+) -> usize {
     let missing = missing_resolvable_keys(resolvable_keys, resolved);
     if !missing.is_empty() {
         eprintln!(
@@ -578,6 +575,7 @@ fn emit_missing_entries_warning(
             missing.join(", ")
         );
     }
+    missing.len()
 }
 
 fn emit_plaintext_secret_warning(env_file: &env_file::EnvFile) -> Result<()> {
@@ -1304,6 +1302,20 @@ mod tests {
 
         let missing = missing_resolvable_keys(&resolvable, &resolved);
         assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn emit_missing_entries_warning_returns_count_of_missing() {
+        let keys = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let resolved = BTreeMap::from([("A".to_string(), "v".to_string())]);
+        assert_eq!(emit_missing_entries_warning(&keys, &resolved), 2);
+    }
+
+    #[test]
+    fn emit_missing_entries_warning_returns_zero_when_all_resolved() {
+        let keys = vec!["A".to_string()];
+        let resolved = BTreeMap::from([("A".to_string(), "v".to_string())]);
+        assert_eq!(emit_missing_entries_warning(&keys, &resolved), 0);
     }
 
     #[test]

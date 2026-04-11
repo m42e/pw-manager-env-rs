@@ -833,6 +833,47 @@ branch "broken"]
     }
 
     #[test]
+    fn normalize_git_remote_url_rejects_local_prefixes_even_with_protocol_like_content() {
+        // Inputs that start with ./ ../ or ~ but also contain :// so they would
+        // survive SCP/host:path fallback – only the prefix guard rejects them.
+        assert_eq!(normalize_git_remote_url("./://x"), None);
+        assert_eq!(normalize_git_remote_url("../://x"), None);
+        assert_eq!(normalize_git_remote_url("~://x"), None);
+    }
+
+    #[test]
+    fn normalize_git_remote_url_rejects_false_windows_drive_from_third_byte_slash() {
+        // "ht://..." has [2]=='/' and [0] is alpha; the windows-drive guard
+        // must NOT reject it (the && chain must stay intact).
+        assert_eq!(
+            normalize_git_remote_url("ht://example.com").as_deref(),
+            Some("ht://example.com")
+        );
+    }
+
+    #[test]
+    fn normalize_git_remote_url_accepts_scheme_only_url() {
+        // "://repo" has no scheme name but contains "://" – the protocol-OR
+        // branch must still accept it; regression for || → && mutation.
+        assert_eq!(
+            normalize_git_remote_url("://repo").as_deref(),
+            Some("://repo")
+        );
+    }
+
+    #[test]
+    fn normalize_git_remote_url_accepts_non_alpha_single_char_host_without_slash() {
+        // "1:repo" is an SCP-style remote with a non-alphabetic single-char
+        // host and a path that does NOT start with '/'.  The guard on line 151
+        // must only reject when host.len()==1 AND path.starts_with('/') AND
+        // !host[0].is_ascii_alphabetic().
+        assert_eq!(
+            normalize_git_remote_url("1:repo.git").as_deref(),
+            Some("1:repo.git")
+        );
+    }
+
+    #[test]
     fn cache_entry_kind_returns_expected_labels() {
         let mk_entry = |kind: EntryKind| EnvEntry {
             key: "K".to_string(),

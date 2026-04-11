@@ -894,4 +894,23 @@ API_KEY=secret\n";
         let path = GpgBackend::gpg_file_path(dir, &config);
         assert_eq!(path, PathBuf::from("/some/dir/secrets.gpg"));
     }
+
+    #[test]
+    fn gpg_backend_reference_url_returns_none() {
+        let config = Config {
+            defaults: Defaults::default(),
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+        let ctx = super::super::StoreContext {
+            dir: std::path::Path::new("/tmp/project"),
+            config: &config,
+            project: None,
+            repository: None,
+        };
+
+        // GpgBackend uses the default trait impl which returns None.
+        assert_eq!(GpgBackend.reference_url("ANY_KEY", &ctx), None);
+    }
 }

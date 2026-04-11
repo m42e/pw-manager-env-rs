@@ -10,6 +10,12 @@ use crate::config::Config;
 use crate::env_file::EnvFile;
 use crate::resolve;
 
+#[cfg(test)]
+thread_local! {
+    static MOCK_INTERACTIVE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static MOCK_PROMPT_RESULT: std::cell::RefCell<Option<BTreeSet<usize>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Run the migration process: detect plaintext secrets in .env, offer to store them
 /// in the configured password backend, then rewrite .env to clear them.
 pub fn migrate(dir: &Path, config: &Config, backend_override: Option<&str>) -> Result<()> {
@@ -158,7 +164,19 @@ fn config_for_migration(config: &Config, dir: &Path, backend_override: Option<&s
 }
 
 fn is_interactive() -> bool {
-    cfg!(not(test)) && std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+    #[cfg(test)]
+    if let Some(val) = MOCK_INTERACTIVE.with(|c| c.get()) {
+        return val;
+    }
+    is_interactive_check(
+        cfg!(not(test)),
+        std::io::stdin().is_terminal(),
+        std::io::stderr().is_terminal(),
+    )
+}
+
+fn is_interactive_check(not_test: bool, stdin_terminal: bool, stderr_terminal: bool) -> bool {
+    not_test && stdin_terminal && stderr_terminal
 }
 
 fn mask_value(value: &str) -> String {
@@ -188,6 +206,11 @@ fn prompt_for_entries(
     entries: &[&crate::env_file::EnvEntry],
     backend_name: &str,
 ) -> Result<BTreeSet<usize>> {
+    #[cfg(test)]
+    if let Some(result) = MOCK_PROMPT_RESULT.with(|r| r.borrow().clone()) {
+        return Ok(result);
+    }
+
     let items = entries
         .iter()
         .map(|entry| {
@@ -452,5 +475,161 @@ mod tests {
         assert_eq!(mask_value("😀"), "***");
         // Three emoji (12 bytes but 3 chars) is ≤3 chars
         assert_eq!(mask_value("😀😁😂"), "***");
+    }
+
+    #[test]
+    fn is_interactive_check_requires_all_true() {
+        assert!(!is_interactive_check(false, true, true));
+        assert!(!is_interactive_check(true, false, true));
+        assert!(!is_interactive_check(true, true, false));
+        assert!(is_interactive_check(true, true, true));
+        assert!(!is_interactive_check(false, false, false));
+    }
+
+    fn set_mock_interactive(val: bool) {
+        MOCK_INTERACTIVE.with(|c| c.set(Some(val)));
+    }
+
+    fn clear_mock_interactive() {
+        MOCK_INTERACTIVE.with(|c| c.set(None));
+    }
+
+    fn set_mock_prompt(indexes: BTreeSet<usize>) {
+        MOCK_PROMPT_RESULT.with(|r| *r.borrow_mut() = Some(indexes));
+    }
+
+    fn clear_mock_prompt() {
+        MOCK_PROMPT_RESULT.with(|r| *r.borrow_mut() = None);
+    }
+
+    fn with_mock_op_backend<F: FnOnce()>(script: &str, f: F) {
+        let _guard = crate::backend::MOCK_PATH_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = TempDir::new().unwrap();
+        let script_path = dir.path().join("op");
+        fs::write(&script_path, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script_path, perms).unwrap();
+        }
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let new_path = std::env::join_paths(
+            std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
+        )
+        .unwrap();
+        unsafe { std::env::set_var("PATH", &new_path) };
+        f();
+        unsafe { std::env::set_var("PATH", &old_path) };
+    }
+
+    #[test]
+    fn migrate_selects_and_stores_chosen_entries() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        // Two plaintext entries: one selected (index 0), one skipped (index 1)
+        fs::write(
+            &env_path,
+            "SECRET_KEY=super_secret_long_value_here\nOTHER_VAL=another_long_plaintext_value\n",
+        )
+        .unwrap();
+
+        let reviewed_dir = TempDir::new().unwrap();
+        crate::config::set_test_reviewed_migrations_path(Some(
+            reviewed_dir.path().join("reviewed-migrations.json"),
+        ));
+
+        let config = crate::config::Config {
+            defaults: crate::config::Defaults {
+                backend: "op".to_string(),
+                op: crate::config::OpConfig {
+                    vault: Some("TestVault".to_string()),
+                    ..crate::config::OpConfig::default()
+                },
+                ..crate::config::Defaults::default()
+            },
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        set_mock_interactive(true);
+        // Select only the first entry (SECRET_KEY at index 0)
+        set_mock_prompt(BTreeSet::from([0]));
+
+        // Mock op that succeeds for all operations (create, get/verify)
+        let script = r#"#!/bin/sh
+# Handle any op command with success
+echo "mock-value"
+exit 0
+"#;
+
+        with_mock_op_backend(script, || {
+            let result = migrate(temp_dir.path(), &config, None);
+            assert!(result.is_ok(), "migration failed: {:?}", result);
+
+            // The .env file should have SECRET_KEY cleared (migrated)
+            // and OTHER_VAL preserved (skipped)
+            let content = fs::read_to_string(&env_path).unwrap();
+            assert!(
+                content.contains("SECRET_KEY="),
+                "SECRET_KEY should still be present as a key"
+            );
+            // The migrated entry should have its value cleared
+            assert!(
+                !content.contains("super_secret_long_value_here"),
+                "migrated value should be cleared from .env"
+            );
+            // The skipped entry should be preserved
+            assert!(
+                content.contains("another_long_plaintext_value"),
+                "skipped entry value should be preserved"
+            );
+        });
+
+        clear_mock_interactive();
+        clear_mock_prompt();
+        crate::config::set_test_reviewed_migrations_path(None);
+    }
+
+    #[test]
+    fn migrate_with_empty_selection_does_not_rewrite_env() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        let original_content = "PASSWORD=very_secret_long_value\n";
+        fs::write(&env_path, original_content).unwrap();
+
+        let reviewed_dir = TempDir::new().unwrap();
+        crate::config::set_test_reviewed_migrations_path(Some(
+            reviewed_dir.path().join("reviewed-migrations.json"),
+        ));
+
+        let config = crate::config::Config {
+            defaults: crate::config::Defaults::default(),
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        set_mock_interactive(true);
+        // Select nothing
+        set_mock_prompt(BTreeSet::new());
+
+        // No backend needed since nothing is selected
+        let script = "#!/bin/sh\nexit 1\n";
+        with_mock_op_backend(script, || {
+            let result = migrate(temp_dir.path(), &config, None);
+            assert!(result.is_ok(), "migration failed: {:?}", result);
+
+            let content = fs::read_to_string(&env_path).unwrap();
+            assert_eq!(content, original_content, ".env should not be modified");
+        });
+
+        clear_mock_interactive();
+        clear_mock_prompt();
+        crate::config::set_test_reviewed_migrations_path(None);
     }
 }

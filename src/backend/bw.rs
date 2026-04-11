@@ -2941,6 +2941,80 @@ mod tests {
         assert_eq!(base64_encode(&[0xff, 0x80, 0x01]), "/4AB");
         assert_eq!(base64_encode(&[0x00, 0xff, 0x10]), "AP8Q");
     }
+
+    #[test]
+    fn reference_url_with_folder_returns_bw_url() {
+        let config = Box::leak(Box::new(Config {
+            defaults: Defaults {
+                bw: BwConfig {
+                    folder: Some("my-folder".to_string()),
+                    ..BwConfig::default()
+                },
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        }));
+
+        let ctx = StoreContext {
+            dir: Path::new("/tmp/project"),
+            config,
+            project: Some("proj".to_string()),
+            repository: None,
+        };
+
+        let url = BwBackend.reference_url("API_KEY", &ctx);
+        assert_eq!(url.as_deref(), Some("bw://my-folder/API_KEY/password"));
+    }
+
+    #[test]
+    fn reference_url_without_folder_returns_bw_url() {
+        let config = Box::leak(Box::new(Config {
+            defaults: Defaults::default(),
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        }));
+
+        let ctx = StoreContext {
+            dir: Path::new("/tmp/project"),
+            config,
+            project: None,
+            repository: None,
+        };
+
+        let url = BwBackend.reference_url("DB_URL", &ctx);
+        assert_eq!(url.as_deref(), Some("bw://DB_URL/password"));
+    }
+
+    #[test]
+    fn reference_url_with_item_uses_item_name() {
+        let config = Box::leak(Box::new(Config {
+            defaults: Defaults {
+                backend: "bw".to_string(),
+                bw: BwConfig {
+                    folder: Some("env".to_string()),
+                    item: Some("shared-secrets".to_string()),
+                    ..BwConfig::default()
+                },
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        }));
+
+        let ctx = StoreContext {
+            dir: Path::new("/tmp/project"),
+            config,
+            project: None,
+            repository: None,
+        };
+
+        let url = BwBackend.reference_url("SECRET", &ctx);
+        assert_eq!(url.as_deref(), Some("bw://env/shared-secrets/SECRET"));
+    }
 }
 fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
