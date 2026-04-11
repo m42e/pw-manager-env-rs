@@ -490,6 +490,7 @@ mod tests {
         MOCK_INTERACTIVE.with(|c| c.set(Some(val)));
     }
 
+    #[allow(dead_code)]
     fn clear_mock_interactive() {
         MOCK_INTERACTIVE.with(|c| c.set(None));
     }
@@ -498,10 +499,12 @@ mod tests {
         MOCK_PROMPT_RESULT.with(|r| *r.borrow_mut() = Some(indexes));
     }
 
+    #[allow(dead_code)]
     fn clear_mock_prompt() {
         MOCK_PROMPT_RESULT.with(|r| *r.borrow_mut() = None);
     }
 
+    #[cfg(unix)]
     fn with_mock_op_backend<F: FnOnce()>(script: &str, f: F) {
         let _guard = crate::backend::MOCK_PATH_MUTEX
             .lock()
@@ -526,6 +529,7 @@ mod tests {
         unsafe { std::env::set_var("PATH", &old_path) };
     }
 
+    #[cfg(unix)]
     #[test]
     fn migrate_selects_and_stores_chosen_entries() {
         let temp_dir = TempDir::new().unwrap();
@@ -595,6 +599,7 @@ exit 0
         crate::config::set_test_reviewed_migrations_path(None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn migrate_with_empty_selection_does_not_rewrite_env() {
         let temp_dir = TempDir::new().unwrap();
