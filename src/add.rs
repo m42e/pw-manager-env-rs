@@ -444,6 +444,34 @@ mod tests {
     }
 
     #[test]
+    fn read_secret_value_rejects_empty_value_from_prompt() {
+        let error = read_secret_value_with(
+            "API_KEY",
+            None,
+            true,
+            |_| Ok(String::new()),
+            || bail!("stdin reader should not be used"),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "Secret value cannot be empty");
+    }
+
+    #[test]
+    fn read_secret_value_rejects_crlf_only_value_from_stdin() {
+        let error = read_secret_value_with(
+            "API_KEY",
+            None,
+            false,
+            |_| bail!("prompt should not be used"),
+            || read_secret_value_from_stdin(std::io::Cursor::new("\r\n")),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "Secret value cannot be empty");
+    }
+
+    #[test]
     #[cfg(unix)]
     fn add_entry_rejects_invalid_key_before_backend_interaction() {
         let _guard = crate::backend::MOCK_PATH_MUTEX

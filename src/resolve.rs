@@ -650,6 +650,92 @@ mod tests {
     }
 
     #[test]
+    fn find_git_dir_resolves_relative_gitdir_file() {
+        let root = unique_subdir("gitdir-relative");
+        let repo_dir = root.join("repo");
+        let worktree_dir = repo_dir.join("worktree");
+        let actual_git_dir = repo_dir.join(".git/worktrees/worktree");
+
+        fs::create_dir_all(&worktree_dir).unwrap();
+        fs::create_dir_all(&actual_git_dir).unwrap();
+        fs::write(
+            worktree_dir.join(".git"),
+            "gitdir: ../.git/worktrees/worktree\n",
+        )
+        .unwrap();
+
+        let result = find_git_dir(&worktree_dir);
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(
+            result,
+            Some(worktree_dir.join("../.git/worktrees/worktree"))
+        );
+    }
+
+    #[test]
+    fn find_git_dir_resolves_absolute_gitdir_file() {
+        let root = unique_subdir("gitdir-absolute");
+        let repo_dir = root.join("repo");
+        let actual_git_dir = root.join("actual.git");
+
+        fs::create_dir_all(&repo_dir).unwrap();
+        fs::create_dir_all(&actual_git_dir).unwrap();
+        fs::write(
+            repo_dir.join(".git"),
+            format!("gitdir: {}\n", actual_git_dir.display()),
+        )
+        .unwrap();
+
+        let result = find_git_dir(&repo_dir);
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(result, Some(actual_git_dir));
+    }
+
+    #[test]
+    fn find_git_dir_returns_none_for_malformed_gitdir_file() {
+        let root = unique_subdir("gitdir-malformed");
+        let repo_dir = root.join("repo");
+
+        fs::create_dir_all(&repo_dir).unwrap();
+        fs::write(repo_dir.join(".git"), "not-a-gitdir-line\n").unwrap();
+
+        let result = find_git_dir(&repo_dir);
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn current_git_branch_returns_none_for_detached_head() {
+        let root = unique_subdir("git-branch-detached");
+        let git_dir = root.join(".git");
+
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::write(git_dir.join("HEAD"), "0123456789abcdef\n").unwrap();
+
+        let result = current_git_branch(&git_dir);
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn current_git_branch_returns_none_for_non_branch_reference() {
+        let root = unique_subdir("git-branch-non-head");
+        let git_dir = root.join(".git");
+
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/tags/v1.0.0\n").unwrap();
+
+        let result = current_git_branch(&git_dir);
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
     fn detect_project_name_uses_folder_name_when_no_git() {
         let root = unique_subdir("proj-name");
         let dir = root.join("my-cool-project");

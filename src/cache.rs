@@ -570,6 +570,39 @@ mod tests {
     }
 
     #[test]
+    fn secret_value_cache_removes_stale_index_when_keyring_entry_is_missing() {
+        let _lock = keyring_test_lock()
+            .lock()
+            .expect("keyring test mutex poisoned");
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let index_path = temp_dir.path().join("pw-env").join(SECRET_CACHE_FILE_NAME);
+        set_test_secret_cache_index_path(Some(index_path));
+        set_test_keyring_available(true);
+
+        let key = sample_key();
+        let fingerprint = key.fingerprint();
+
+        let mut cache = SecretValueCache::load(&CacheConfig::default());
+        cache.set(&key, "secret-value");
+
+        TEST_KEYRING
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values
+            .remove(&fingerprint);
+
+        let mut reloaded = SecretValueCache::load(&CacheConfig::default());
+        let cached = reloaded.get(&key);
+        let saved_index = SecretCacheIndex::load().unwrap();
+
+        assert!(cached.is_none());
+        assert!(saved_index.entries.is_empty());
+
+        reset_test_keyring();
+        set_test_secret_cache_index_path(None);
+    }
+
+    #[test]
     fn secret_cache_index_path_returns_configured_test_path() {
         let _lock = keyring_test_lock()
             .lock()

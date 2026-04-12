@@ -2664,9 +2664,30 @@ backend = "op"
 
         Config::approve_project_override(&override_path).unwrap();
         let result = Config::revoke_project_override_approval(&override_path).unwrap();
+        let configs = Config::approved_project_configs().unwrap();
         let _ = fs::remove_dir_all(&test_dir);
 
         assert!(result, "revoking an approved override should return true");
+        assert!(configs.is_empty(), "revocation should persist removal");
+    }
+
+    #[test]
+    fn revoke_project_override_approval_returns_false_for_unapproved_entry() {
+        let test_dir = unique_test_dir("revoke-proj-override-false");
+        fs::create_dir_all(&test_dir).unwrap();
+        set_test_approval_store(&test_dir);
+        let override_path = test_dir.join(PROJECT_OVERRIDE_FILE_NAME);
+        fs::write(&override_path, "backend = \"op\"\n").unwrap();
+
+        let result = Config::revoke_project_override_approval(&override_path).unwrap();
+        let configs = Config::approved_project_configs().unwrap();
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(!result, "revoking a missing override should return false");
+        assert!(
+            configs.is_empty(),
+            "missing approval should leave store empty"
+        );
     }
 
     #[test]
@@ -2701,11 +2722,35 @@ backend = "op"
 
         Config::approve_secret_fetch(&env_path, SecretFetchApprovalMode::CurrentEnvHash).unwrap();
         let result = Config::revoke_secret_fetch_approval(&env_path).unwrap();
+        let fetches = Config::approved_secret_fetches().unwrap();
         let _ = fs::remove_dir_all(&test_dir);
 
         assert!(
             result,
             "revoking an approved secret fetch should return true"
+        );
+        assert!(fetches.is_empty(), "revocation should persist removal");
+    }
+
+    #[test]
+    fn revoke_secret_fetch_approval_returns_false_for_unapproved_entry() {
+        let test_dir = unique_test_dir("revoke-sf-false");
+        fs::create_dir_all(&test_dir).unwrap();
+        set_test_secret_fetch_store(&test_dir);
+        let env_path = test_dir.join(".env");
+        fs::write(&env_path, "KEY=op://vault/item/key\n").unwrap();
+
+        let result = Config::revoke_secret_fetch_approval(&env_path).unwrap();
+        let fetches = Config::approved_secret_fetches().unwrap();
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(
+            !result,
+            "revoking a missing secret fetch should return false"
+        );
+        assert!(
+            fetches.is_empty(),
+            "missing approval should leave store empty"
         );
     }
 
@@ -2955,6 +3000,52 @@ backend = "op"
             !after.contains(fp),
             "fingerprint should be absent after forget()"
         );
+    }
+
+    #[test]
+    fn reviewed_migrations_forget_removes_only_requested_fingerprints() {
+        let test_dir = unique_test_dir("rm-forget-partial");
+        fs::create_dir_all(&test_dir).unwrap();
+        let env_path = test_dir.join(".env");
+        let mut reviewed = ReviewedMigrations::default();
+
+        reviewed.remember(
+            &env_path,
+            [
+                "first".to_string(),
+                "second".to_string(),
+                "third".to_string(),
+            ],
+        );
+        reviewed.forget(&env_path, ["first".to_string(), "third".to_string()]);
+
+        let fingerprints = reviewed.fingerprints(&env_path);
+        let expected = BTreeSet::from(["second".to_string()]);
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert_eq!(fingerprints, expected);
+    }
+
+    #[test]
+    fn reviewed_migrations_forget_ignores_unknown_fingerprints() {
+        let test_dir = unique_test_dir("rm-forget-missing");
+        fs::create_dir_all(&test_dir).unwrap();
+        let missing_env_path = test_dir.join("missing.env");
+        let remembered_env_path = test_dir.join("remembered.env");
+        let mut reviewed = ReviewedMigrations::default();
+
+        reviewed.forget(&missing_env_path, ["missing".to_string()]);
+        let empty = reviewed.fingerprints(&missing_env_path);
+
+        reviewed.remember(&remembered_env_path, ["kept".to_string()]);
+        reviewed.forget(&remembered_env_path, ["other".to_string()]);
+
+        let fingerprints = reviewed.fingerprints(&remembered_env_path);
+        let expected = BTreeSet::from(["kept".to_string()]);
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(empty.is_empty(), "missing entries should remain empty");
+        assert_eq!(fingerprints, expected);
     }
 
     // ── Test for ReviewedMigrations::path (L927) ──────────────────────────────
