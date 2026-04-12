@@ -15,7 +15,7 @@ pub const REPOSITORY_FIELD_NAME: &str = "repository";
 /// Single shared mutex for all mock PATH manipulations in tests.
 /// All backend mock helpers (bw, gpg, op) must hold this lock while modifying PATH
 /// to prevent cross-module races when running tests in parallel.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) static MOCK_PATH_MUTEX: std::sync::LazyLock<std::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
