@@ -2,6 +2,7 @@ mod add;
 mod backend;
 mod cache;
 mod config;
+mod config_wizard;
 mod env_file;
 mod migrate;
 mod output;
@@ -119,6 +120,8 @@ enum Commands {
     },
     /// Print the default configuration file template
     ConfigTemplate,
+    /// Open an interactive TUI that builds and saves the global config file
+    ConfigWizard,
     /// Generate shell completion script
     ///
     /// Add one of the following lines to your shell's startup file:
@@ -191,7 +194,7 @@ fn main() {
     let cli = Cli::parse();
 
     // Load config early (before logging setup) to get log settings
-    let config = match config::Config::load() {
+    let config = match load_config_for_command(&cli.command) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error loading config: {e}");
@@ -211,7 +214,20 @@ fn main() {
     }
 }
 
-fn run(cli: Cli, _config: config::Config) -> Result<()> {
+fn load_config_for_command(command: &Commands) -> Result<config::Config> {
+    match config::Config::load() {
+        Ok(config) => Ok(config),
+        Err(err) if matches!(command, Commands::ConfigWizard) => {
+            eprintln!(
+                "Warning: failed to load the existing config, starting the wizard with defaults: {err:#}"
+            );
+            Ok(config::Config::default())
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn run(cli: Cli, config: config::Config) -> Result<()> {
     match cli.command {
         Commands::Init { shell } => {
             print!("{}", shell::generate_hook(&shell));
@@ -502,6 +518,8 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
             Ok(())
         }
 
+        Commands::ConfigWizard => config_wizard::run(&config),
+
         Commands::Completions { shell } => {
             generate(shell, &mut Cli::command(), "pw-env", &mut std::io::stdout());
             Ok(())
@@ -516,6 +534,7 @@ fn maybe_check_for_release_update(command: &Commands, config: &config::Config) {
         Commands::Exec { .. }
             | Commands::Export { .. }
             | Commands::Hook { .. }
+            | Commands::ConfigWizard
             | Commands::Update { .. }
     ) {
         return;

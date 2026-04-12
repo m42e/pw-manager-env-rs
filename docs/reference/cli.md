@@ -17,6 +17,7 @@
 | `cache` | Clear local metadata caches and the resolved-secret cache index |
 | `update` | Replace the current binary with a GitHub release build |
 | `config-template` | Print the default config template |
+| `config-wizard` | Open an interactive TUI that builds and saves the global config |
 
 ## `init`
 
@@ -160,6 +161,17 @@ Print the default `config.toml` template to stdout.
 
 The template includes `[defaults.cache]`, where `enabled = true` and `ttl_hours = 4` control the resolved-secret
 cache.
+
+## `config-wizard`
+
+```console
+pw-env config-wizard
+```
+
+Open a split-pane terminal UI with configuration questions on the left and a live TOML preview on the right.
+
+The wizard loads the current global config when it is valid, preserves any existing `[[projects]]` entries, and writes
+the generated file back to `~/.config/pw-env/config.toml`.
 
 ## Help and version
 
