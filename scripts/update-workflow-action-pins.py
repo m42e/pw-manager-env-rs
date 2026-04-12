@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS_DIR = ROOT / ".github" / "workflows"
 
-USES_LINE_PATTERN = re.compile(r'^(\s*-\s+uses:\s*)([^@\s]+)@([^\s#]+)(?:\s+(#.*))?$')
+USES_LINE_PATTERN = re.compile(r'^(\s*(?:-\s+)?uses:\s*)([^@\s]+)@([^\s#]+)(?:\s+(#.*))?$')
 PIN_COMMENT_PATTERN = re.compile(r'(?:^|\s)#\s*pin:\s*([^\s#]+)')
 
 GITHUB_HEADERS = {
