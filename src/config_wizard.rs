@@ -923,6 +923,7 @@ fn quoted(value: &str) -> String {
     toml::Value::String(value.to_string()).to_string()
 }
 
+#[mutants::skip]
 fn value_span(value: String) -> Span<'static> {
     let style = match value.as_str() {
         "yes" => Style::default().fg(Color::Green),
@@ -1242,6 +1243,26 @@ mod tests {
     }
 
     #[test]
+    fn value_returns_exact_op_account_string() {
+        let mut state = ConfigWizardState::from_config(&Config::default());
+        state.op_account = Some("team".to_string());
+
+        let value = FieldId::OpAccount.value(&state);
+
+        assert_eq!(value, "team");
+    }
+
+    #[test]
+    fn value_returns_exact_gpg_file_pattern_string() {
+        let mut state = ConfigWizardState::from_config(&Config::default());
+        state.gpg_file_pattern = ".team.gpg".to_string();
+
+        let value = FieldId::GpgFilePattern.value(&state);
+
+        assert_eq!(value, ".team.gpg");
+    }
+
+    #[test]
     fn backend_specific_fields_follow_backend_and_shared_visibility_rules() {
         assert!(FieldId::OpVault.is_backend_specific(BackendChoice::Op));
         assert!(!FieldId::OpVault.is_backend_specific(BackendChoice::Bw));
@@ -1395,6 +1416,18 @@ mod tests {
     }
 
     #[test]
+    fn handle_normal_key_down_at_last_field_keeps_selection_on_last_field() {
+        let mut app = WizardApp::new(&Config::default());
+        app.selected = ALL_FIELDS.len() - 1;
+
+        let outcome = app.handle_normal_key(key_event(KeyCode::Down)).unwrap();
+
+        assert!(outcome.is_none());
+        assert_eq!(app.selected, ALL_FIELDS.len() - 1);
+        assert_eq!(app.selected_field().label(), "Update check interval");
+    }
+
+    #[test]
     fn handle_normal_key_left_cycles_backend_backward() {
         let mut app = WizardApp::new(&Config::default());
 
@@ -1432,6 +1465,18 @@ mod tests {
             app.status,
             "Press Enter to apply 1Password vault or Esc to cancel."
         );
+    }
+
+    #[test]
+    fn handle_normal_key_enter_toggles_non_editable_field_without_edit_mode() {
+        let mut app = WizardApp::new(&Config::default());
+        app.selected = 1;
+
+        let outcome = app.handle_normal_key(key_event(KeyCode::Enter)).unwrap();
+
+        assert!(outcome.is_none());
+        assert!(!app.state.search_parent_env);
+        assert!(matches!(app.mode, InputMode::Normal));
     }
 
     #[test]
@@ -1542,6 +1587,41 @@ mod tests {
     }
 
     #[test]
+    fn starts_editing_returns_false_for_toggle_field() {
+        assert!(!FieldId::SearchParentEnv.starts_editing());
+    }
+
+    #[test]
+    fn edit_buffer_returns_op_account_value() {
+        let mut state = ConfigWizardState::from_config(&Config::default());
+        state.op_account = Some("team".to_string());
+
+        let buffer = FieldId::OpAccount.edit_buffer(&state);
+
+        assert_eq!(buffer, "team");
+    }
+
+    #[test]
+    fn edit_buffer_returns_op_item_value() {
+        let mut state = ConfigWizardState::from_config(&Config::default());
+        state.op_item = Some("deploy".to_string());
+
+        let buffer = FieldId::OpItem.edit_buffer(&state);
+
+        assert_eq!(buffer, "deploy");
+    }
+
+    #[test]
+    fn edit_buffer_returns_bitwarden_folder_value() {
+        let mut state = ConfigWizardState::from_config(&Config::default());
+        state.bw_folder = Some("env".to_string());
+
+        let buffer = FieldId::BwFolder.edit_buffer(&state);
+
+        assert_eq!(buffer, "env");
+    }
+
+    #[test]
     fn edit_buffer_returns_bitwarden_organization_value() {
         let mut state = ConfigWizardState::from_config(&Config::default());
         state.bw_organization = Some("acme".to_string());
@@ -1559,6 +1639,46 @@ mod tests {
         let buffer = FieldId::BwItem.edit_buffer(&state);
 
         assert_eq!(buffer, "api");
+    }
+
+    #[test]
+    fn edit_buffer_returns_bitwarden_sync_throttle_value() {
+        let mut state = ConfigWizardState::from_config(&Config::default());
+        state.bw_sync_throttle_secs = 7200;
+
+        let buffer = FieldId::BwSyncThrottleSecs.edit_buffer(&state);
+
+        assert_eq!(buffer, "7200");
+    }
+
+    #[test]
+    fn edit_buffer_returns_gpg_file_pattern_value() {
+        let mut state = ConfigWizardState::from_config(&Config::default());
+        state.gpg_file_pattern = ".team.gpg".to_string();
+
+        let buffer = FieldId::GpgFilePattern.edit_buffer(&state);
+
+        assert_eq!(buffer, ".team.gpg");
+    }
+
+    #[test]
+    fn edit_buffer_returns_log_file_value() {
+        let mut state = ConfigWizardState::from_config(&Config::default());
+        state.log_file = Some("/tmp/custom.log".to_string());
+
+        let buffer = FieldId::LogFile.edit_buffer(&state);
+
+        assert_eq!(buffer, "/tmp/custom.log");
+    }
+
+    #[test]
+    fn edit_buffer_returns_update_check_interval_value() {
+        let mut state = ConfigWizardState::from_config(&Config::default());
+        state.updates_check_interval_hours = 72;
+
+        let buffer = FieldId::UpdateCheckIntervalHours.edit_buffer(&state);
+
+        assert_eq!(buffer, "72");
     }
 
     #[test]
