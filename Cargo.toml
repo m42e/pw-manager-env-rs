@@ -36,6 +36,9 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
+[dev-dependencies]
+portable-pty = "0.9"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6.3", features = ["apple-native"] }
 

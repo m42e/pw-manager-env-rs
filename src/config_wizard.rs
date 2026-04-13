@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use serde::Serialize;
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 
 use crate::config::{self, Config, ProjectOverride};
@@ -175,21 +175,30 @@ fn save_config_to_path(path: &Path, config_text: &str) -> Result<()> {
         .with_context(|| format!("Failed to write {}", path.display()))
 }
 
-struct TerminalSession;
+struct TerminalSession<W: Write = io::Stdout> {
+    writer: W,
+}
 
-impl TerminalSession {
+impl TerminalSession<io::Stdout> {
     fn enter() -> Result<Self> {
         enable_raw_mode().context("Failed to enable raw mode")?;
-        execute!(io::stdout(), EnterAlternateScreen, Hide)
-            .context("Failed to enter alternate screen")?;
-        Ok(Self)
+        let mut writer = io::stdout();
+        execute!(writer, EnterAlternateScreen, Hide).context("Failed to enter alternate screen")?;
+        Ok(Self { writer })
     }
 }
 
-impl Drop for TerminalSession {
+impl<W: Write> TerminalSession<W> {
+    #[cfg(test)]
+    fn new_for_test(writer: W) -> Self {
+        Self { writer }
+    }
+}
+
+impl<W: Write> Drop for TerminalSession<W> {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+        let _ = execute!(self.writer.by_ref(), Show, LeaveAlternateScreen);
     }
 }
 
@@ -888,8 +897,32 @@ mod tests {
         BwConfig, CacheConfig, Defaults, GpgConfig, LogConfig, OpConfig, UpdateConfig,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::backend::TestBackend;
     use std::fs;
+    use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
+
+    #[derive(Clone, Default)]
+    struct SharedWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl SharedWriter {
+        fn snapshot(&self) -> String {
+            String::from_utf8(self.buffer.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    impl Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn key_event(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -897,6 +930,20 @@ mod tests {
 
     fn ctrl_key_event(ch: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
+    }
+
+    fn normalize_rendered_config_path(rendered: &str) -> String {
+        rendered
+            .lines()
+            .map(|line| {
+                if line.starts_with("# Path: ") {
+                    "# Path: <dynamic>"
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
@@ -1028,6 +1075,19 @@ mod tests {
     }
 
     #[test]
+    fn render_config_includes_defaults_op_section_when_only_account_is_set() {
+        let mut state = ConfigWizardState::from_config(&Config::default());
+        state.op_account = Some("team".to_string());
+
+        let rendered = state.render_config();
+
+        assert!(rendered.contains("[defaults.op]"));
+        assert!(rendered.contains("account = \"team\""));
+        assert!(!rendered.contains("vault = "));
+        assert!(!rendered.contains("item = "));
+    }
+
+    #[test]
     fn save_config_to_path_creates_expected_file() {
         let workspace = TempDir::new().unwrap();
         let target = workspace.path().join("pw-env/config.toml");
@@ -1068,9 +1128,19 @@ mod tests {
     }
 
     #[test]
+    fn backend_choice_from_value_maps_gpg() {
+        assert_eq!(BackendChoice::from_value("gpg").as_str(), "gpg");
+    }
+
+    #[test]
     fn log_level_choice_from_value_maps_warn_and_error() {
         assert_eq!(LogLevelChoice::from_value("warn").as_str(), "warn");
         assert_eq!(LogLevelChoice::from_value("error").as_str(), "error");
+    }
+
+    #[test]
+    fn log_level_choice_from_value_maps_trace() {
+        assert_eq!(LogLevelChoice::from_value("trace").as_str(), "trace");
     }
 
     #[test]
@@ -1130,6 +1200,42 @@ mod tests {
     }
 
     #[test]
+    fn apply_edit_updates_backend_specific_optional_fields() {
+        let mut state = ConfigWizardState::from_config(&Config::default());
+
+        FieldId::OpItem.apply_edit(&mut state, " deploy ").unwrap();
+        FieldId::BwFolder.apply_edit(&mut state, " env ").unwrap();
+        FieldId::BwOrganization
+            .apply_edit(&mut state, " acme ")
+            .unwrap();
+        FieldId::BwItem.apply_edit(&mut state, " api ").unwrap();
+        FieldId::GpgRecipient
+            .apply_edit(&mut state, " ops@example.com ")
+            .unwrap();
+
+        assert_eq!(state.op_item.as_deref(), Some("deploy"));
+        assert_eq!(state.bw_folder.as_deref(), Some("env"));
+        assert_eq!(state.bw_organization.as_deref(), Some("acme"));
+        assert_eq!(state.bw_item.as_deref(), Some("api"));
+        assert_eq!(state.gpg_recipient.as_deref(), Some("ops@example.com"));
+    }
+
+    #[test]
+    fn apply_edit_updates_log_file_and_update_interval() {
+        let mut state = ConfigWizardState::from_config(&Config::default());
+
+        FieldId::LogFile
+            .apply_edit(&mut state, " /tmp/custom.log ")
+            .unwrap();
+        FieldId::UpdateCheckIntervalHours
+            .apply_edit(&mut state, "72")
+            .unwrap();
+
+        assert_eq!(state.log_file.as_deref(), Some("/tmp/custom.log"));
+        assert_eq!(state.updates_check_interval_hours, 72);
+    }
+
+    #[test]
     fn handle_key_delegates_normal_mode_keys() {
         let mut app = WizardApp::new(&Config::default());
 
@@ -1148,6 +1254,27 @@ mod tests {
     }
 
     #[test]
+    fn handle_normal_key_ctrl_c_cancels() {
+        let mut app = WizardApp::new(&Config::default());
+
+        let outcome = app.handle_normal_key(ctrl_key_event('c')).unwrap();
+
+        assert!(matches!(outcome, Some(WizardOutcome::Cancelled)));
+    }
+
+    #[test]
+    fn handle_normal_key_plain_c_does_not_cancel() {
+        let mut app = WizardApp::new(&Config::default());
+
+        let outcome = app
+            .handle_normal_key(key_event(KeyCode::Char('c')))
+            .unwrap();
+
+        assert!(outcome.is_none());
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
     fn handle_normal_key_up_moves_selection_up() {
         let mut app = WizardApp::new(&Config::default());
         app.selected = 1;
@@ -1156,6 +1283,16 @@ mod tests {
 
         assert!(outcome.is_none());
         assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn handle_normal_key_down_moves_selection_down() {
+        let mut app = WizardApp::new(&Config::default());
+
+        let outcome = app.handle_normal_key(key_event(KeyCode::Down)).unwrap();
+
+        assert!(outcome.is_none());
+        assert_eq!(app.selected, 1);
     }
 
     #[test]
@@ -1214,14 +1351,16 @@ mod tests {
     #[test]
     fn handle_normal_key_saves_rendered_config() {
         let mut app = WizardApp::new(&Config::default());
-        let expected = app.state.render_config();
+        let expected = normalize_rendered_config_path(&app.state.render_config());
 
         let outcome = app
             .handle_normal_key(key_event(KeyCode::Char('s')))
             .unwrap();
 
         match outcome {
-            Some(WizardOutcome::Save(rendered)) => assert_eq!(rendered, expected),
+            Some(WizardOutcome::Save(rendered)) => {
+                assert_eq!(normalize_rendered_config_path(&rendered), expected)
+            }
             _ => panic!("expected save outcome"),
         }
     }
@@ -1250,5 +1389,43 @@ mod tests {
 
         assert!(keep_editing);
         assert_eq!(buffer, "ab");
+    }
+
+    #[test]
+    fn option_display_formats_some_and_none() {
+        assert_eq!(option_display(&Some("value".to_string())), "value");
+        assert_eq!(option_display(&None), "<empty>");
+    }
+
+    #[test]
+    fn yes_no_formats_true_and_false() {
+        assert_eq!(yes_no(true), "yes");
+        assert_eq!(yes_no(false), "no");
+    }
+
+    #[test]
+    fn render_draws_visible_sections_into_terminal_buffer() {
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = WizardApp::new(&Config::default());
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        let screen = format!("{}", terminal.backend());
+        assert!(screen.contains("Questions"), "screen was: {screen}");
+        assert!(screen.contains("Built Config"), "screen was: {screen}");
+        assert!(screen.contains("Controls"), "screen was: {screen}");
+    }
+
+    #[test]
+    fn terminal_session_drop_restores_terminal_escape_sequences() {
+        let writer = SharedWriter::default();
+        let snapshot = writer.clone();
+
+        drop(TerminalSession::new_for_test(writer));
+
+        let output = snapshot.snapshot();
+        assert!(output.contains("\u{1b}[?25h"), "output was: {output:?}");
+        assert!(output.contains("\u{1b}[?1049l"), "output was: {output:?}");
     }
 }
