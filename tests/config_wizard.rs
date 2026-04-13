@@ -24,19 +24,36 @@ fn run_config_wizard_in_pty(input: &str) -> (String, portable_pty::ExitStatus) {
     drop(pair.slave);
 
     let mut reader = pair.master.try_clone_reader().unwrap();
-    let mut writer = pair.master.take_writer().unwrap();
+    let writer = Arc::new(Mutex::new(pair.master.take_writer().unwrap()));
     let output = Arc::new(Mutex::new(Vec::new()));
     let output_reader = Arc::clone(&output);
+    let writer_for_reader = Arc::clone(&writer);
     let (reader_done_tx, reader_done_rx) = mpsc::channel();
     let reader_thread = thread::spawn(move || {
         let mut buffer = [0_u8; 4096];
+        let mut pending = Vec::new();
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
-                Ok(read) => output_reader
-                    .lock()
-                    .unwrap()
-                    .extend_from_slice(&buffer[..read]),
+                Ok(read) => {
+                    let chunk = &buffer[..read];
+                    output_reader.lock().unwrap().extend_from_slice(chunk);
+
+                    pending.extend_from_slice(chunk);
+                    while let Some(pos) = pending.windows(4).position(|window| window == b"\x1b[6n")
+                    {
+                        pending.drain(..pos + 4);
+                        writer_for_reader
+                            .lock()
+                            .unwrap()
+                            .write_all(b"\x1b[1;1R")
+                            .unwrap();
+                        writer_for_reader.lock().unwrap().flush().unwrap();
+                    }
+
+                    let keep_from = pending.len().saturating_sub(3);
+                    pending.drain(..keep_from);
+                }
                 Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(_) => break,
             }
@@ -45,9 +62,8 @@ fn run_config_wizard_in_pty(input: &str) -> (String, portable_pty::ExitStatus) {
     });
 
     thread::sleep(Duration::from_millis(100));
-    writer.write_all(input.as_bytes()).unwrap();
-    writer.flush().unwrap();
-    drop(writer);
+    writer.lock().unwrap().write_all(input.as_bytes()).unwrap();
+    writer.lock().unwrap().flush().unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let status = loop {
@@ -55,6 +71,7 @@ fn run_config_wizard_in_pty(input: &str) -> (String, portable_pty::ExitStatus) {
             break status;
         }
         if Instant::now() >= deadline {
+            drop(writer);
             child.kill().unwrap();
             drop(pair.master);
             let _ = reader_done_rx.recv_timeout(Duration::from_secs(1));
@@ -64,6 +81,7 @@ fn run_config_wizard_in_pty(input: &str) -> (String, portable_pty::ExitStatus) {
         thread::sleep(Duration::from_millis(10));
     };
 
+    drop(writer);
     drop(pair.master);
     if reader_done_rx.recv_timeout(Duration::from_secs(1)).is_ok() {
         reader_thread.join().unwrap();

@@ -55,9 +55,9 @@ fn is_interactive_check(
     not_test: bool,
     stdin_terminal: bool,
     stdout_terminal: bool,
-    stderr_terminal: bool,
+    _stderr_terminal: bool,
 ) -> bool {
-    not_test && stdin_terminal && stdout_terminal && stderr_terminal
+    not_test && stdin_terminal && stdout_terminal
 }
 
 fn run_tui(mut app: WizardApp) -> Result<WizardOutcome> {
@@ -1037,10 +1037,10 @@ mod tests {
     }
 
     #[test]
-    fn is_interactive_check_requires_all_terminal_streams() {
+    fn is_interactive_check_requires_terminal_input_and_output() {
         assert!(!is_interactive_check(true, false, true, true));
         assert!(!is_interactive_check(true, true, false, true));
-        assert!(!is_interactive_check(true, true, true, false));
+        assert!(is_interactive_check(true, true, true, false));
         assert!(!is_interactive_check(false, true, true, true));
         assert!(is_interactive_check(true, true, true, true));
     }
