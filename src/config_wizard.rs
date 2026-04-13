@@ -87,7 +87,7 @@ fn run_tui(mut app: WizardApp) -> Result<WizardOutcome> {
 fn render(frame: &mut Frame, app: &WizardApp) {
     let areas = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(8), Constraint::Length(4)])
+        .constraints([Constraint::Min(8), Constraint::Length(8)])
         .split(frame.area());
 
     let panes = Layout::default()
@@ -131,11 +131,14 @@ fn render(frame: &mut Frame, app: &WizardApp) {
     frame.render_widget(preview, panes[1]);
 
     let selected_field = app.selected_field();
-    let (mode_line, controls_block) = match &app.mode {
+    let (mode_lines, controls_block) = match &app.mode {
         InputMode::Normal => (
-            Line::from(
-                "Arrows move. Space toggles booleans. Left/right cycles choices. Enter edits text. s saves. q quits.",
-            ),
+            vec![
+                Line::from(
+                    "Arrows move. Space toggles booleans. Left/right cycles choices. Enter edits text.",
+                ),
+                Line::from("s saves. q quits."),
+            ],
             Block::default().borders(Borders::ALL).title("Controls"),
         ),
         InputMode::Editing { buffer } => {
@@ -145,7 +148,7 @@ fn render(frame: &mut Frame, app: &WizardApp) {
                 buffer.clone()
             };
             (
-                Line::from(vec![
+                vec![Line::from(vec![
                     Span::raw("Editing "),
                     Span::styled(
                         selected_field.label(),
@@ -155,7 +158,7 @@ fn render(frame: &mut Frame, app: &WizardApp) {
                     ),
                     Span::raw(": "),
                     Span::styled(displayed, Style::default().fg(Color::Yellow)),
-                ]),
+                ])],
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Yellow))
@@ -181,13 +184,13 @@ fn render(frame: &mut Frame, app: &WizardApp) {
     ]))
     .block(Block::default().borders(Borders::ALL).title("Help"))
     .wrap(Wrap { trim: false });
-    let mode = Paragraph::new(mode_line)
+    let mode = Paragraph::new(Text::from(mode_lines))
         .block(controls_block)
         .wrap(Wrap { trim: false });
 
     let bottom = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Length(4)])
         .split(areas[1]);
     frame.render_widget(help, bottom[0]);
     frame.render_widget(mode, bottom[1]);
