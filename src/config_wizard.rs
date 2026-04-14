@@ -1612,6 +1612,16 @@ mod tests {
     }
 
     #[test]
+    fn edit_buffer_returns_cache_ttl_value() {
+        let mut state = ConfigWizardState::from_config(&Config::default());
+        state.cache_ttl_hours = 12;
+
+        let buffer = FieldId::CacheTtlHours.edit_buffer(&state);
+
+        assert_eq!(buffer, "12");
+    }
+
+    #[test]
     fn edit_buffer_returns_bitwarden_folder_value() {
         let mut state = ConfigWizardState::from_config(&Config::default());
         state.bw_folder = Some("env".to_string());
@@ -1662,6 +1672,16 @@ mod tests {
     }
 
     #[test]
+    fn edit_buffer_returns_gpg_recipient_value() {
+        let mut state = ConfigWizardState::from_config(&Config::default());
+        state.gpg_recipient = Some("ops@example.com".to_string());
+
+        let buffer = FieldId::GpgRecipient.edit_buffer(&state);
+
+        assert_eq!(buffer, "ops@example.com");
+    }
+
+    #[test]
     fn edit_buffer_returns_log_file_value() {
         let mut state = ConfigWizardState::from_config(&Config::default());
         state.log_file = Some("/tmp/custom.log".to_string());
@@ -1691,6 +1711,44 @@ mod tests {
     fn yes_no_formats_true_and_false() {
         assert_eq!(yes_no(true), "yes");
         assert_eq!(yes_no(false), "no");
+    }
+
+    #[test]
+    fn highlight_toml_preserves_true_value_text_and_styles_it_green() {
+        let highlighted = highlight_toml("enabled = true");
+        let line = &highlighted.lines[0];
+
+        assert_eq!(line.spans[0].content.as_ref(), "enabled ");
+        assert_eq!(line.spans[1].content.as_ref(), "=");
+        assert_eq!(line.spans[2].content.as_ref(), " true");
+        assert_eq!(line.spans[2].style.fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn highlight_toml_styles_false_values_red() {
+        let highlighted = highlight_toml("enabled = false");
+        let line = &highlighted.lines[0];
+
+        assert_eq!(line.spans[2].content.as_ref(), " false");
+        assert_eq!(line.spans[2].style.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn highlight_toml_styles_quoted_values_green() {
+        let highlighted = highlight_toml("backend = \"gpg\"");
+        let line = &highlighted.lines[0];
+
+        assert_eq!(line.spans[2].content.as_ref(), " \"gpg\"");
+        assert_eq!(line.spans[2].style.fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn highlight_toml_styles_bare_values_cyan() {
+        let highlighted = highlight_toml("ttl_hours = 12");
+        let line = &highlighted.lines[0];
+
+        assert_eq!(line.spans[2].content.as_ref(), " 12");
+        assert_eq!(line.spans[2].style.fg, Some(Color::Cyan));
     }
 
     #[test]

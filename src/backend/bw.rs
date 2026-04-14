@@ -1659,6 +1659,30 @@ mod tests {
     }
 
     #[test]
+    fn set_test_sync_throttle_override_updates_effective_value() {
+        BwBackend::set_test_sync_throttle_override(None);
+        assert_eq!(
+            BwBackend::effective_sync_throttle_secs(),
+            DEFAULT_SYNC_THROTTLE_SECS
+        );
+
+        BwBackend::set_test_sync_throttle_override(Some(7200));
+        assert_eq!(BwBackend::effective_sync_throttle_secs(), 7200);
+
+        BwBackend::set_test_sync_throttle_override(Some(30));
+        assert_eq!(
+            BwBackend::effective_sync_throttle_secs(),
+            MIN_SYNC_THROTTLE_SECS
+        );
+
+        BwBackend::set_test_sync_throttle_override(None);
+        assert_eq!(
+            BwBackend::effective_sync_throttle_secs(),
+            DEFAULT_SYNC_THROTTLE_SECS
+        );
+    }
+
+    #[test]
     fn should_retry_after_sync_matches_expected_patterns() {
         for message in [
             "No Bitwarden items found with name 'KEY'",

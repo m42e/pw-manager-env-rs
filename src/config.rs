@@ -2671,6 +2671,24 @@ backend = "op"
             .with(|v| *v.borrow_mut() = Some(dir.join("reviewed-migrations.json")));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn set_test_reviewed_migrations_path_overrides_and_clears_store_path() {
+        let test_dir = unique_test_dir("reviewed-migrations-path-override");
+        fs::create_dir_all(&test_dir).unwrap();
+        let override_path = test_dir.join("custom-reviewed-migrations.json");
+
+        set_test_reviewed_migrations_path(Some(override_path.clone()));
+        assert_eq!(ReviewedMigrations::path(), Some(override_path.clone()));
+
+        set_test_reviewed_migrations_path(None);
+        let restored_path = ReviewedMigrations::path();
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(restored_path.is_some());
+        assert_ne!(restored_path, Some(override_path));
+    }
+
     #[test]
     fn approved_project_configs_contains_entry_after_approval() {
         let test_dir = unique_test_dir("apc-entries-after-approval");
