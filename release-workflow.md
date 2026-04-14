@@ -22,7 +22,8 @@ You can also run the same workflow from the GitHub Actions UI.
 2. Review the generated release PR.
 
 The workflow creates branch `release/v0.1.1`, updates `Cargo.toml`, refreshes `Cargo.lock` when needed, generates
-`release-notes/v0.1.1.md`, and opens PR `Release v0.1.1` labeled `release`.
+`release-notes/v0.1.1.md`, refreshes `docs/pw-env-config-init-migrate-auto-load.gif`, and opens PR `Release v0.1.1`
+labeled `release`.
 
 If you close that PR without merging it, the `release/v0.1.1` branch is removed automatically.
 

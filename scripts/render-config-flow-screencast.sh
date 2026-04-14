@@ -4,10 +4,24 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+prepend_path_if_dir() {
+  if [ -d "$1" ]; then
+    case ":$PATH:" in
+      *":$1:"*) ;;
+      *) PATH="$1:$PATH" ;;
+    esac
+  fi
+}
+
+prepend_path_if_dir /opt/homebrew/bin
+prepend_path_if_dir /usr/local/bin
+export PATH
+
 OUTPUT_DIR="$REPO_ROOT/target/screencasts"
 OUTPUT_BASENAME="pw-env-config-init-migrate-auto-load"
 SKIP_BUILD=0
 KEEP_WORKDIR=0
+UPDATE_DOCS=0
 WORKDIR=""
 
 usage() {
@@ -22,6 +36,7 @@ Options:
   --output-dir <dir>  Directory for rendered assets. Defaults to target/screencasts.
   --skip-build        Reuse the existing target/release/pw-env binary.
   --keep-workdir      Keep the generated tape and demo workspace after rendering.
+  --update-docs       Copy the rendered GIF to docs/pw-env-config-init-migrate-auto-load.gif.
   -h, --help          Show this help text.
 EOF
 }
@@ -48,6 +63,10 @@ while [ $# -gt 0 ]; do
       ;;
     --keep-workdir)
       KEEP_WORKDIR=1
+      shift
+      ;;
+    --update-docs)
+      UPDATE_DOCS=1
       shift
       ;;
     -h|--help)
@@ -79,6 +98,7 @@ GPG_BATCH_PATH="$WORKDIR/demo-gpg.batch"
 TAPE_PATH="$WORKDIR/${OUTPUT_BASENAME}.tape"
 GIF_PATH="$OUTPUT_DIR/${OUTPUT_BASENAME}.gif"
 MP4_PATH="$OUTPUT_DIR/${OUTPUT_BASENAME}.mp4"
+DOCS_GIF_PATH="$REPO_ROOT/docs/${OUTPUT_BASENAME}.gif"
 
 cleanup() {
   if [ "$KEEP_WORKDIR" -eq 0 ] && [ -n "$WORKDIR" ] && [ -d "$WORKDIR" ]; then
@@ -252,6 +272,13 @@ Sleep 3500ms
 EOF
 
 vhs "$TAPE_PATH"
+
+if [ "$UPDATE_DOCS" -ne 0 ]; then
+  if [ "$GIF_PATH" != "$DOCS_GIF_PATH" ]; then
+    cp "$GIF_PATH" "$DOCS_GIF_PATH"
+  fi
+  echo "Updated docs GIF: $DOCS_GIF_PATH"
+fi
 
 echo "Rendered GIF: $GIF_PATH"
 echo "Rendered MP4: $MP4_PATH"
