@@ -1,6 +1,6 @@
 [package]
 name = "pw-env"
-version = "0.3.7"
+version = "0.3.8"
 edition = "2024"
 
 [[bin]]
