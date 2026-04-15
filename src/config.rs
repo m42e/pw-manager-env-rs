@@ -1392,6 +1392,77 @@ backend = "gpg"
     }
 
     #[test]
+    fn test_project_backend_sections_attach_to_most_recent_project() {
+        let toml_str = r#"
+[defaults]
+backend = "op"
+
+[defaults.gpg]
+file_pattern = ".env.gpg"
+
+[[projects]]
+path = "/home/user/work/company-api"
+backend = "op"
+item = "company-api-env"
+
+[projects.op]
+vault = "Work"
+
+[[projects]]
+path = "/home/user/personal/site"
+backend = "gpg"
+
+[projects.gpg]
+file_pattern = ".secrets.gpg"
+recipient = "you@example.com"
+"#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+
+        assert_eq!(config.projects.len(), 2);
+
+        let first_project = &config.projects[0];
+        assert_eq!(first_project.path, "/home/user/work/company-api");
+        assert_eq!(first_project.backend.as_deref(), Some("op"));
+        assert_eq!(
+            first_project.op.as_ref().and_then(|op| op.vault.as_deref()),
+            Some("Work")
+        );
+        assert!(first_project.gpg.is_none());
+
+        let second_project = &config.projects[1];
+        assert_eq!(second_project.path, "/home/user/personal/site");
+        assert_eq!(second_project.backend.as_deref(), Some("gpg"));
+        assert_eq!(
+            second_project
+                .gpg
+                .as_ref()
+                .map(|gpg| gpg.file_pattern.as_str()),
+            Some(".secrets.gpg")
+        );
+        assert_eq!(
+            second_project
+                .gpg
+                .as_ref()
+                .and_then(|gpg| gpg.recipient.as_deref()),
+            Some("you@example.com")
+        );
+
+        assert_eq!(
+            config
+                .effective_gpg(Path::new("/home/user/work/company-api"))
+                .file_pattern,
+            ".env.gpg"
+        );
+        assert_eq!(
+            config
+                .effective_gpg(Path::new("/home/user/personal/site"))
+                .file_pattern,
+            ".secrets.gpg"
+        );
+    }
+
+    #[test]
     fn test_project_for_prefers_most_specific_match() {
         let config = Config {
             defaults: Defaults::default(),
