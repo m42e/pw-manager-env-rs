@@ -44,7 +44,11 @@ jobs:
       - name: Install screencast dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg gnupg golang-go ttyd
+          if apt-cache show pkg-config >/dev/null 2>&1; then
+            sudo apt-get install -y ffmpeg gnupg golang-go ttyd libdbus-1-dev pkg-config
+          else
+            sudo apt-get install -y ffmpeg gnupg golang-go ttyd libdbus-1-dev pkgconf
+          fi
           GOBIN="$HOME/.local/bin" go install github.com/charmbracelet/vhs@v0.11.0
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
